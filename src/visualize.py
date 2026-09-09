@@ -83,7 +83,9 @@ def plot_interactive_map(gdf, out_path):
         overlay=False,
         control=True,
     ).add_to(m)
-    folium.LayerControl(collapsed=False).add_to(m)
+    # bottomright, not topright: the branca colormap legend from .explore()
+    # also docks topright and was covering the layer control there.
+    folium.LayerControl(collapsed=False, position="bottomright").add_to(m)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     m.save(str(out_path))
