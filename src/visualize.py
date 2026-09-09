@@ -163,7 +163,14 @@ def plot_interactive_map(gdf, out_path):
     folium.LayerControl(collapsed=False, position="bottomright").add_to(m)
 
     m.get_root().script.add_child(folium.Element(SPARKLINE_JS))
-    m.get_root().script.add_child(folium.Element(f"bindNdviSparklines({m.get_name()});"))
+    # Deferred to the window 'load' event rather than called inline: folium
+    # doesn't guarantee this script runs after the map variable is actually
+    # assigned (it does for the Map/GeoJson/TileLayer/LayerControl objects
+    # added above, but not for an arbitrary appended Element) -- 'load'
+    # fires only after every synchronous inline script has already run.
+    m.get_root().script.add_child(folium.Element(
+        f"window.addEventListener('load', function() {{ bindNdviSparklines({m.get_name()}); }});"
+    ))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     m.save(str(out_path))
