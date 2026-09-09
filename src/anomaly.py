@@ -28,7 +28,9 @@ from sqlalchemy import text
 from src.db import get_engine
 
 Z_THRESHOLD = -2.0  # ~2 standard deviations below the neighborhood mean deviation
-REPORTS_DIR = Path(__file__).resolve().parent.parent / "data" / "processed"
+# Unlike data/raw and data/processed (gitignored — regenerable from source
+# imagery), reports/ is committed: it's the portfolio-facing output.
+REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 
 
 def compute_anomalies(z_threshold=Z_THRESHOLD):
