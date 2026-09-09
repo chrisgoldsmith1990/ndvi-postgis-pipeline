@@ -6,14 +6,23 @@ is anomalous relative to their spatial neighbors — the same shape of problem
 as continental-scale agricultural monitoring, run here on one county so the
 whole thing is reviewable in one sitting.
 
+![McLean County field NDVI map, August 2026](reports/county_ndvi_map.png)
+
+Every polygon is a real McLean County parcel, colored by its August mean
+NDVI; the black-outlined ones are fields flagged as anomalous relative to
+their spatial neighbors (see [Results](#results)). The blank area in the
+middle is Bloomington-Normal — it drops out on its own because the >10-acre
+parcel filter excludes town lots. An interactive version
+(`reports/county_ndvi_map.html`, pan/zoom/click any parcel for its NDVI and
+anomaly flag) is generated alongside this one by `src/visualize.py`.
+
 ![Persistently anomalous field vs. its neighbors](reports/anomaly_example.png)
 
 The field above sits flat around -0.2 to -0.3 NDVI across three months while
 its eight nearest neighbors follow the expected green-up curve
 (0.50 → 0.66 → 0.67). That flat, never-greens-up shape is water or bare
 ground, not a struggling crop — real crop stress still tracks the season,
-just below its neighbors. This is one output of `src/anomaly.py`; see
-[Results](#results) for the rest.
+just below its neighbors.
 
 ## Why Python *and* PostGIS
 
@@ -63,6 +72,7 @@ it's the query planner's job and a five-line query.
 | 5 | Neighbor comparison via GIST-accelerated KNN (`<->`) | [`src/neighbor_comparison.py`](src/neighbor_comparison.py) |
 | 6 | Time series + anomaly flag | [`src/anomaly.py`](src/anomaly.py) |
 | 7 | This README | — |
+| — | County map (static + interactive), the payoff of 4-6 | [`src/visualize.py`](src/visualize.py) |
 
 ## Study area
 
@@ -104,6 +114,7 @@ python -m src.load_boundaries        # once — parcels don't change month to mo
 python -m src.zonal_stats 2026-08
 python -m src.neighbor_comparison 2026-08
 python -m src.anomaly
+python -m src.visualize 2026-08   # writes reports/county_ndvi_map.{png,html}
 ```
 
 ## What NDVI measures, and why neighbor comparison matters
