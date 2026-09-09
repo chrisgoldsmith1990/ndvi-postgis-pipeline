@@ -69,7 +69,22 @@ def plot_interactive_map(gdf, out_path):
         vmax=1,
         tooltip=["pin", "ndvi_mean", "is_anomaly"],
         style_kwds={"weight": 0.5},
+        name="Parcels (NDVI)",
     )
+
+    # Satellite layer for ground-truthing flagged parcels against what's
+    # actually there (e.g. a plant or quarry, not a crop under stress).
+    import folium
+
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+        name="Satellite",
+        overlay=False,
+        control=True,
+    ).add_to(m)
+    folium.LayerControl(collapsed=False).add_to(m)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     m.save(str(out_path))
     print(f"Wrote {out_path}", flush=True)

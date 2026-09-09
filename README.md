@@ -14,7 +14,20 @@ their spatial neighbors (see [Results](#results)). The blank area in the
 middle is Bloomington-Normal — it drops out on its own because the >10-acre
 parcel filter excludes town lots. An interactive version
 (`reports/county_ndvi_map.html`, pan/zoom/click any parcel for its NDVI and
-anomaly flag) is generated alongside this one by `src/visualize.py`.
+anomaly flag, satellite basemap toggle for ground-truthing) is generated
+alongside this one by `src/visualize.py`.
+
+Ground-truthing the flagged parcels against satellite imagery turns up
+exactly what you'd expect from a >10-acre parcel filter with no land-use
+attribute to screen on: golf courses, cemeteries, quarries, detention
+ponds — and the Rivian plant in Normal (a multi-hundred-acre former auto
+plant, now flat pavement and rooftop where the parcel data has no way to
+know that isn't a field). None of these are pipeline bugs; they're the
+correct output of "large parcel, doesn't green up like its neighbors,"
+which just isn't the same claim as "cropland in distress." A production
+version would cross-reference land-use/zoning data to exclude non-
+agricultural parcels before flagging; this one surfaces them and leaves the
+judgment call visible instead of hiding it.
 
 ![Persistently anomalous field vs. its neighbors](reports/anomaly_example.png)
 
