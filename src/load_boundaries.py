@@ -60,14 +60,14 @@ def fetch_parcels(min_acres=MIN_ACRES):
 
 def load_to_postgis(gdf, table_name="parcels"):
     engine = get_engine()
+    # GeoAlchemy2's to_postgis creates a GIST index on the geometry column by
+    # default (idx_<table>_<geom_col>) — no separate CREATE INDEX needed.
     gdf.to_postgis(table_name, engine, if_exists="replace", index=False)
     with engine.begin() as conn:
         # Real county parcel data reliably includes a handful of self-intersecting
         # rings; ST_MakeValid before anything downstream tries ST_Intersects on them.
         conn.execute(text(f'UPDATE {table_name} SET geometry = ST_MakeValid(geometry) '
                            f'WHERE NOT ST_IsValid(geometry)'))
-        conn.execute(text(f'CREATE INDEX IF NOT EXISTS {table_name}_geom_gist '
-                           f'ON {table_name} USING GIST (geometry)'))
     print(f"Loaded {len(gdf)} parcels into '{table_name}' with a GIST index", flush=True)
 
 
