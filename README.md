@@ -6,6 +6,14 @@ is anomalous relative to their spatial neighbors — the same shape of problem
 as continental-scale agricultural monitoring, run here on one county so the
 whole thing is reviewable in one sitting.
 
+This is a batch pipeline run on demand, not a live service — there's no
+backend, and the map on GitHub Pages is a static snapshot of one run's
+output, not a live query. Making "pick any county on a map" work on demand
+would mean solving nationwide parcel-data sourcing (every county runs its
+own GIS portal, no unified free source) and standing up a real hosted
+backend — a genuinely different, larger project than this one, which is
+deliberately scoped to one county done well rather than a platform.
+
 ![McLean County field NDVI map, August 2026](reports/county_ndvi_map.png)
 
 Every polygon is a real McLean County parcel, colored by its August mean
