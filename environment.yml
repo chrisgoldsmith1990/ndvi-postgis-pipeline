@@ -1,0 +1,20 @@
+name: ndvi-postgis
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - geopandas
+  - rasterio
+  - rasterstats
+  - shapely
+  - pyproj
+  - xarray
+  - matplotlib
+  - jupyterlab
+  - psycopg2
+  - sqlalchemy
+  - geoalchemy2
+  - python-dotenv
+  - requests
+  - pystac-client   # for querying Sentinel-2 imagery on AWS Open Data / Element84 STAC API
+  - pip

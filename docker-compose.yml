@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: ndvi_postgis
+    environment:
+      POSTGRES_DB: ndvi
+      POSTGRES_USER: ndvi
+      POSTGRES_PASSWORD: ndvi
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d
+
+volumes:
+  pgdata:

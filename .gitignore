@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.egg-info/
+.env
+
+# Conda / venv
+.venv/
+env/
+
+# Data — satellite imagery and derived rasters are large and shouldn't be committed
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Postgres
+pgdata/
+
+# OS
+.DS_Store
+Thumbs.db
