@@ -35,6 +35,11 @@ def compute_ndvi(red_path, nir_path, out_path):
 
 
 if __name__ == "__main__":
-    scene_dir = sorted((DATA_DIR / "raw").iterdir())[-1]
+    import sys
+
+    if len(sys.argv) > 1:
+        scene_dir = DATA_DIR / "raw" / sys.argv[1]
+    else:
+        scene_dir = sorted((DATA_DIR / "raw").iterdir())[-1]
     out_path = DATA_DIR / "processed" / scene_dir.name / "ndvi.tif"
     compute_ndvi(scene_dir / "red.tif", scene_dir / "nir.tif", out_path)

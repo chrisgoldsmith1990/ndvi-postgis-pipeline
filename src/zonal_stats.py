@@ -55,6 +55,12 @@ def load_zonal_stats(result, date, table_name="ndvi_zonal_stats"):
     result = result.copy()
     result["date"] = date
     engine = get_engine()
+    with engine.begin() as conn:
+        exists = conn.execute(text(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = :t)"
+        ), {"t": table_name}).scalar()
+        if exists:
+            conn.execute(text(f"DELETE FROM {table_name} WHERE date = :date"), {"date": date})
     result.to_sql(table_name, engine, if_exists="append", index=False)
     with engine.begin() as conn:
         conn.execute(text(f'CREATE INDEX IF NOT EXISTS {table_name}_pin_date '
@@ -63,7 +69,12 @@ def load_zonal_stats(result, date, table_name="ndvi_zonal_stats"):
 
 
 if __name__ == "__main__":
-    ndvi_dir = sorted((DATA_DIR / "processed").iterdir())[-1]
+    import sys
+
+    if len(sys.argv) > 1:
+        ndvi_dir = DATA_DIR / "processed" / sys.argv[1]
+    else:
+        ndvi_dir = sorted((DATA_DIR / "processed").iterdir())[-1]
     date = ndvi_dir.name
     result = compute_zonal_stats(ndvi_dir / "ndvi.tif")
     valid = result["ndvi_mean"].notna().sum()
