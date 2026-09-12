@@ -132,7 +132,14 @@ def plot_interactive_map(gdf, out_path):
         overlay=False,
         control=True,
     ).add_to(m)
-    folium.LayerControl(collapsed=False, position="bottomright").add_to(m)
+    # topright, not bottomright: unlike visualize.py's continuous colorbar
+    # (a real Leaflet control, docks via the corner-stacking system), a
+    # *categorical* legend from geopandas.explore() renders as a plain
+    # `.maplegend` div with hardcoded `position: fixed; right: 10px;
+    # bottom: 20px` -- it doesn't know about Leaflet controls at all, so it
+    # can't stack with them, it just sits on top. Putting the layer control
+    # in the one fixed corner (topright) the legend never touches.
+    folium.LayerControl(collapsed=False, position="topright").add_to(m)
 
     m.get_root().script.add_child(folium.Element(SPARKLINE_JS))
     m.get_root().script.add_child(folium.Element(
