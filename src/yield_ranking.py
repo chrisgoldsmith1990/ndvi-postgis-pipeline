@@ -57,7 +57,26 @@ stand-in for "how much yield spread this method typically explains."
 This is explicitly a rough approximation, not a validated per-field
 prediction -- it borrows a real, cited relationship's *spread*, not its
 exact fitted equation.
+
+## Per-acre rate isn't the estimate -- total bushels is
+
+A bu/ac rate alone doesn't say what a field actually produces: parcels in
+this subset range from about a dozen to well over a hundred acres. The
+number that matters is bu/ac x the parcel's own acreage (`computed_ac`
+from the parcels table, the same acreage field load_boundaries.py loads
+from the county's parcel layer).
 """
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from sqlalchemy import text
+
+from src.crop_clusters import cluster, extract_features, fit_splines, label_cluster, load_series
+from src.db import get_engine
+
+REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 
 # 2025 McLean County actual NASS yields (source: farmdoc daily / USDA-NASS
 # county estimates). Corn: 77.31M bu / 318,000 harvested acres. Soybean:
@@ -75,6 +94,20 @@ LITERATURE_CV = {
 }
 
 
+def seasonal_ndvi_integral(splines, doy):
+    """Area under each parcel's fitted curve across the observed date
+    range (trapezoidal integration of a fine grid) -- the season-long
+    biomass-accumulation proxy, not a single date's value."""
+    dense_doy = np.arange(int(doy.min()), int(doy.max()) + 1)
+    return {pin: np.trapezoid(cs(dense_doy), dense_doy) for pin, cs in splines.items()}
+
+
+def rank_within_cluster(feats):
+    feats = feats.copy()
+    feats["percentile_in_cluster"] = feats.groupby("cluster")["seasonal_ndvi_integral"].rank(pct=True) * 100
+    return feats
+
+
 def estimate_yield_bu_ac(feats):
     """Approximate bu/ac per parcel: county-actual anchor for its crop-type
     cluster, scaled by its within-cluster z-score times the literature
@@ -87,27 +120,23 @@ def estimate_yield_bu_ac(feats):
     feats["estimated_yield_bu_ac"] = anchor * (1 + cv * z)
     return feats
 
-from pathlib import Path
 
-import numpy as np
-import pandas as pd
-
-from src.crop_clusters import cluster, extract_features, fit_splines, label_cluster, load_series
-
-REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
-
-
-def seasonal_ndvi_integral(splines, doy):
-    """Area under each parcel's fitted curve across the observed date
-    range (trapezoidal integration of a fine grid) -- the season-long
-    biomass-accumulation proxy, not a single date's value."""
-    dense_doy = np.arange(int(doy.min()), int(doy.max()) + 1)
-    return {pin: np.trapezoid(cs(dense_doy), dense_doy) for pin, cs in splines.items()}
+def fetch_acreage(pins):
+    """computed_ac per parcel from the parcels table -- the same acreage
+    field load_boundaries.py loads from the county's parcel layer."""
+    engine = get_engine()
+    query = text("SELECT pin, computed_ac FROM parcels WHERE pin = ANY(:pins)")
+    df = pd.read_sql(query, engine, params={"pins": list(pins)})
+    return df.set_index("pin")["computed_ac"]
 
 
-def rank_within_cluster(feats):
+def estimate_total_bushels(feats, acreage):
+    """The actual estimate: bu/ac x the parcel's own acreage. A rate alone
+    doesn't say what a field produces -- these parcels range from a dozen
+    to well over a hundred acres."""
     feats = feats.copy()
-    feats["percentile_in_cluster"] = feats.groupby("cluster")["seasonal_ndvi_integral"].rank(pct=True) * 100
+    feats["acres"] = feats.index.map(acreage)
+    feats["estimated_total_bushels"] = feats["estimated_yield_bu_ac"] * feats["acres"]
     return feats
 
 
@@ -126,19 +155,23 @@ if __name__ == "__main__":
     feats["cluster_label"] = feats["cluster"].map(label_by_id)
     feats = estimate_yield_bu_ac(feats)
 
+    acreage = fetch_acreage(feats.index)
+    feats = estimate_total_bushels(feats, acreage)
+
     print("Season-integrated NDVI stats by cluster:")
     print(feats.groupby("cluster")["seasonal_ndvi_integral"].describe()[["count", "mean", "std", "min", "max"]].round(1))
 
-    print("\nEstimated bu/ac stats by cluster (approximate -- see module docstring):")
-    print(feats.groupby("cluster_label")["estimated_yield_bu_ac"].describe()[["count", "mean", "std", "min", "max"]].round(1))
+    print("\nEstimated total bushels by cluster (approximate -- see module docstring):")
+    print(feats.groupby("cluster_label")["estimated_total_bushels"].describe()[["count", "mean", "std", "min", "max"]].round(0))
 
     print("\nTop 5 relative performers per cluster:")
     for cid, group in feats.groupby("cluster"):
         top = group.sort_values("percentile_in_cluster", ascending=False).head(5)
         print(f"\nCluster {cid} (n={len(group)}):")
-        print(top[["seasonal_ndvi_integral", "percentile_in_cluster", "estimated_yield_bu_ac"]].round(1))
+        print(top[["seasonal_ndvi_integral", "percentile_in_cluster", "acres",
+                    "estimated_yield_bu_ac", "estimated_total_bushels"]].round(1))
 
     out = feats[["cluster", "cluster_label", "seasonal_ndvi_integral", "percentile_in_cluster",
-                 "estimated_yield_bu_ac", "confidence"]]
+                 "acres", "estimated_yield_bu_ac", "estimated_total_bushels", "confidence"]]
     out.to_csv(REPORTS_DIR / "yield_ranking.csv")
     print(f"\nWrote {REPORTS_DIR / 'yield_ranking.csv'}", flush=True)

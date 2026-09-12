@@ -25,7 +25,13 @@ from sqlalchemy import text
 
 from src.crop_clusters import cluster, extract_features, fit_splines, label_cluster, load_series
 from src.db import get_engine
-from src.yield_ranking import estimate_yield_bu_ac, rank_within_cluster, seasonal_ndvi_integral
+from src.yield_ranking import (
+    estimate_total_bushels,
+    estimate_yield_bu_ac,
+    fetch_acreage,
+    rank_within_cluster,
+    seasonal_ndvi_integral,
+)
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 
@@ -44,6 +50,7 @@ def build_dataset():
     feats["seasonal_ndvi_integral"] = feats.index.map(integrals)
     feats = rank_within_cluster(feats)
     feats = estimate_yield_bu_ac(feats)
+    feats = estimate_total_bushels(feats, fetch_acreage(feats.index))
 
     engine = get_engine()
     pins = feats.index.tolist()
@@ -101,13 +108,17 @@ function bindSubsetPopups(map) {
             var confColor = confPct >= 75 ? '#2c7a3f' : (confPct >= 60 ? '#e67e22' : '#c0392b');
             var confWord = confPct >= 75 ? 'high' : (confPct >= 60 ? 'moderate' : 'low');
 
-            // estimated_yield_bu_ac is null for the non-row-crop cluster (no
-            // corresponding crop-yield literature/anchor applies -- see
+            // estimated_total_bushels is null for the non-row-crop cluster
+            // (no corresponding crop-yield literature/anchor applies -- see
             // yield_ranking.py; pandas NaN serializes to GeoJSON as null).
+            // Total bushels (rate x this parcel's own acreage) is the
+            // estimate that matters -- the bu/ac rate alone doesn't say
+            // what the field actually produces.
             var yieldHtml = '';
-            if (props.estimated_yield_bu_ac !== null) {
-                yieldHtml = '<br>Est. yield: <b>' + props.estimated_yield_bu_ac.toFixed(0) + ' bu/ac</b>' +
-                            ' (' + Math.round(props.percentile_in_cluster) + 'th percentile in cluster)' +
+            if (props.estimated_total_bushels !== null) {
+                yieldHtml = '<br>Est. yield: <b>' + Math.round(props.estimated_total_bushels).toLocaleString() + ' bu</b>' +
+                            ' (' + props.estimated_yield_bu_ac.toFixed(0) + ' bu/ac &times; ' + props.acres.toFixed(0) + ' ac)' +
+                            '<br>' + Math.round(props.percentile_in_cluster) + 'th percentile in cluster' +
                             '<br><span style="font-size:10px;color:#777">approximate -- see README</span>';
             }
 

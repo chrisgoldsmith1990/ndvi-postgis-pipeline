@@ -244,12 +244,17 @@ That's a real constraint on validating this, not an oversight.)
 ranks each parcel's season-integrated NDVI against others in its own
 crop-type cluster, the same neighbor-relative logic the anomaly detector
 uses, applied to a crop-type peer group instead of a spatial one. An
-approximate bu/ac estimate is also computed, anchored to McLean County's
+approximate bu/ac rate is also computed, anchored to McLean County's
 actual 2025 NASS yield (243.1 bu/ac corn, 73.95 bu/ac soybean) and scaled
 by real published models' coefficient of variation (Johnson et al. 2021,
 *Remote Sens.* 13(21):4227 — Illinois-level accumulated-NDVI R²=0.91 for
-corn, only R²=0.54 for soybean). This is explicitly an approximation — it
-borrows a cited relationship's *spread*, not a fitted equation specific
-to this subset — and should be trusted much less for the soybean-like
-majority of parcels than for the corn-like ones, per the source paper's
+corn, only R²=0.54 for soybean) — but the rate alone isn't the estimate
+that matters, since parcels in this subset range from a dozen to well
+over a hundred acres. The actual reported estimate is **total bushels**:
+that rate multiplied by the parcel's own acreage (`computed_ac`, the same
+field `load_boundaries.py` loads from the county parcel layer). This is
+explicitly an approximation — it borrows a cited relationship's *spread*,
+not a fitted equation specific to this subset — and should be trusted
+much less for the soybean-like majority of parcels than for the corn-like
+ones, per the source paper's
 own finding.
