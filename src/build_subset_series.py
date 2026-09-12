@@ -23,21 +23,27 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SUBSET_TABLE = "ndvi_zonal_stats_subset_clipped"
 
 
-def run(parcels_table="parcels_clipped", zonal_table=SUBSET_TABLE, recompute_ndvi=True):
-    """NDVI + zonal stats for every fetch_timeseries.py date, against
-    whichever parcels table is given -- e.g. parcels_clipped once
-    clip_parcels.py has run, to compare against the unclipped baseline."""
-    # data/raw/ also holds the old monthly composites ("2026-06", 7 chars)
-    # from fetch_imagery.py -- only process fetch_timeseries.py's full-date
-    # ("2026-04-09", 10 chars) directories here.
-    raw_dirs = sorted(d for d in (DATA_DIR / "raw").iterdir() if len(d.name) == 10)
+def run(parcels_table="parcels_clipped", zonal_table=SUBSET_TABLE, recompute_ndvi=True,
+        raw_dir=None, processed_dir=None):
+    """NDVI + zonal stats for every fetch_timeseries.py/fetch_hls.py date,
+    against whichever parcels table is given. raw_dir/processed_dir default
+    to the subset paths (data/raw, data/processed); pass data/raw/county
+    and data/processed/county for the county-wide run, so its NDVI outputs
+    never collide with a subset date that happens to share a calendar date."""
+    raw_dir = raw_dir or (DATA_DIR / "raw")
+    processed_dir = processed_dir or (DATA_DIR / "processed")
+
+    # raw_dir also holds the old monthly composites ("2026-06", 7 chars)
+    # from fetch_imagery.py -- only process the full-date ("2026-04-09",
+    # 10 chars) directories here.
+    raw_dirs = sorted(d for d in raw_dir.iterdir() if len(d.name) == 10)
     for scene_dir in raw_dirs:
         date = scene_dir.name
         red, nir = scene_dir / "red.tif", scene_dir / "nir.tif"
         if not (red.exists() and nir.exists()):
             continue
 
-        ndvi_path = DATA_DIR / "processed" / date / "ndvi.tif"
+        ndvi_path = processed_dir / date / "ndvi.tif"
         if recompute_ndvi or not ndvi_path.exists():
             compute_ndvi(red, nir, ndvi_path)
 
@@ -48,4 +54,10 @@ def run(parcels_table="parcels_clipped", zonal_table=SUBSET_TABLE, recompute_ndv
 
 
 if __name__ == "__main__":
-    run()
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "county":
+        run(parcels_table="parcels_clipped_county", zonal_table="ndvi_zonal_stats_county_clipped",
+            raw_dir=DATA_DIR / "raw" / "county", processed_dir=DATA_DIR / "processed" / "county")
+    else:
+        run()

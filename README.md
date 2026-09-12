@@ -322,3 +322,82 @@ per-parcel precision (and now feeds the yield estimate's acreage), not
 for the aggregate corn/soybean story, which turns out to be robust to it.
 `ndvi_zonal_stats_subset_clipped` is now the default the crop-type
 pipeline reads from.
+
+## Scaling the crop-type pipeline to all of McLean County
+
+Everything above ran on a ~163-parcel subset to keep per-acquisition-date
+fetching cheap. Running the same pipeline — imagery, clipping, clustering,
+yield ranking — against all **9,571** county parcels (fetch scope: all
+four Sentinel-2/HLS MGRS tiles covering the county, not one) surfaced
+three real bugs that the subset was too small and too uniform to expose.
+
+**Static, not interactive, at this scale** — `src/visualize_county_crops.py`
+renders a plain matplotlib choropleth rather than `visualize_subset.py`'s
+per-parcel hover map: embedding a full NDVI curve in every popup works
+fine at 163 parcels (a 6–9MB page) but would balloon to several hundred MB
+at 9,571, the same trade-off `visualize.py`'s anomaly map already made.
+
+**Bug 1 — whole-AOI cloud rejection discarded far more than it should have.**
+`fetch_timeseries.py`'s per-date cloud check averaged bad-pixel fraction
+across the *entire* bounding box before deciding whether to keep that
+date at all. At subset scale (an 8km box) that's a reasonable proxy — a
+cloud covering over a third of it plausibly means the whole small area is
+compromised. At county scale (68×53km) it's wrong: a cloud sitting over
+one third of the county could push the whole-AOI average over threshold
+and discard *every* parcel's data for that date, including parcels sitting
+in perfectly clear sky on the other side of the county. Caught by a direct
+question about exactly this ("are we throwing out the whole county when we
+hit that threshold?") rather than found by inspection. Fixed by raising
+the whole-AOI threshold to 0.9 (reject only near-total cloud cover) for
+county-scale runs and letting the existing per-pixel masking do the real
+filtering — `rasterstats`' NaN-aware zonal averaging already excludes only
+the pixels actually under cloud, per parcel. Result: 43 of 72 candidate
+dates recovered, versus 11 of 72 before the fix.
+
+**Bug 2 — a strict shared-date requirement no longer made sense once
+rejection became per-pixel.** With the fix above, individual parcels
+genuinely do end up with different numbers of usable dates now (per-date
+valid coverage across the county ranged from ~2,000 to ~9,565 of 9,571
+parcels, depending on where that day's clouds happened to sit) —
+`crop_clusters.fit_splines()` used to require every parcel share the exact
+same global date list (`.dropna()` on a complete-case pivot), which was
+fine when a whole-AOI check meant every date either cleared for everyone
+or nobody. Fixed by fitting each parcel's PCHIP curve on its own valid
+dates instead, excluding a parcel outright only if it has fewer than 6
+valid dates or less than 60 days of season span — rather than requiring
+one shared date set for all 9,571 parcels, which would mean dropping
+almost every parcel or almost every date. (Checked first that this
+wasn't hiding a coverage gap: every kept parcel's own date range actually
+spans April–September, not just some narrow mid-season window — the
+60-day-span floor isn't doing the real work here, per-parcel valid-date
+count is.)
+
+**Bug 3 — one joint clustering pass couldn't find both real splits at
+county scale.** The first county-wide run produced two clusters and
+identified *zero* parcels as corn-like — implausible for a county that's
+close to half corn by actual harvested acreage (318,000 corn vs. 294,000
+soybean acres, 2025 NASS). The cause: silhouette-based k-selection over
+the whole population picked k=2, and the strong, high-variance
+already-green-in-April (non-row-crop) split dominated that choice over
+the comparatively subtler corn/soybean peak-timing split, lumping every
+row-crop parcel into one undifferentiated group. Confirmed by re-running
+KMeans on just the row-crop parcels in isolation, which cleanly recovered
+two peak-timing clusters (~day 199 and ~day 232 mean peak — consistent
+with corn peaking first). Fixed by splitting the clustering into two
+explicit stages: a deterministic `early_ndvi` threshold pulls out
+non-row-crop first (the same rule the cluster-labeling step already used
+to *name* clusters after the fact — now it also performs the split, not
+just the naming), then only the remaining row-crop parcels go through
+KMeans to find the corn/soybean split. An earlier attempt used a forced
+k=2 KMeans fit to *find* the non-row-crop split instead of a fixed
+threshold; that fixed the county run but split on an unrelated axis
+entirely at the smaller subset scale, leaving almost nothing for the
+second stage — the deterministic threshold is what actually generalizes
+across both scales.
+
+**Result:** 3,641 corn-like, 4,379 soybean-like, 1,545 non-row-crop, out
+of 9,565 clustered parcels (6 more excluded by the date-coverage
+thresholds above) — a near-even row-crop split consistent with the
+county's real acreage.
+
+![McLean County crop-type clusters, full county](reports/county_crop_map.png)

@@ -30,7 +30,7 @@ import requests
 from pystac_client import Client
 from rasterio.merge import merge
 
-from src.fetch_timeseries import MAX_BAD_FRACTION, SUBSET_BBOX
+from src.fetch_timeseries import COUNTY_BBOX, MAX_BAD_FRACTION, SUBSET_BBOX
 
 socket.setdefaulttimeout(30)
 
@@ -103,17 +103,23 @@ def _mosaic_band(items, band_key, bbox):
     return mosaic[0], transform, crs
 
 
-def build_date(items, date, bbox=SUBSET_BBOX):
+def build_date(items, date, bbox=SUBSET_BBOX, raw_dir=RAW_DIR, max_bad_fraction=MAX_BAD_FRACTION):
     """Mosaic red/NIR/Fmask for one date, mask cloud/shadow via Fmask, and
     write red.tif/nir.tif -- same nodata-zeroing convention
-    fetch_timeseries.py uses, so compute_ndvi.py needs no changes."""
+    fetch_timeseries.py uses, so compute_ndvi.py needs no changes.
+
+    max_bad_fraction: see fetch_timeseries.build_date's docstring -- a
+    whole-AOI aggregate threshold is wrong at county scale, since it
+    discards every parcel's data over a partial-county cloud rather than
+    just the parcels actually under it. Raise close to 1.0 for county-wide
+    runs and let per-parcel zonal averaging do the real filtering."""
     red, transform, crs = _mosaic_band(items, "B04", bbox)
     nir, _, _ = _mosaic_band(items, "B05", bbox)
     fmask, _, _ = _mosaic_band(items, "Fmask", bbox)
 
     bad_mask = (fmask.astype(np.uint8) & FMASK_BAD_BITS) != 0
     bad_fraction = bad_mask.mean()
-    if bad_fraction > MAX_BAD_FRACTION:
+    if bad_fraction > max_bad_fraction:
         print(f"  {date}: {bad_fraction:.0%} cloud/shadow (Fmask) -- skipped", flush=True)
         return None
 
@@ -123,7 +129,7 @@ def build_date(items, date, bbox=SUBSET_BBOX):
     red[combined_bad] = 0
     nir[combined_bad] = 0
 
-    out_dir = RAW_DIR / str(date)
+    out_dir = raw_dir / str(date)
     if out_dir.exists() and any(out_dir.iterdir()):
         # Landsat's 16-day cycle is offset from Sentinel-2's, so a same-date
         # collision is unlikely in practice -- but silently overwriting a
@@ -144,10 +150,17 @@ def build_date(items, date, bbox=SUBSET_BBOX):
 
 
 if __name__ == "__main__":
-    by_date = find_season_items()
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "county":
+        bbox, raw_dir, max_bad = COUNTY_BBOX, RAW_DIR / "county", 0.9
+    else:
+        bbox, raw_dir, max_bad = SUBSET_BBOX, RAW_DIR, MAX_BAD_FRACTION
+
+    by_date = find_season_items(bbox=bbox)
     written = []
     for date, items in by_date.items():
-        result = build_date(items, date)
+        result = build_date(items, date, bbox=bbox, raw_dir=raw_dir, max_bad_fraction=max_bad)
         if result is not None:
             written.append(str(date))
     print(f"\nWrote {len(written)}/{len(by_date)} candidate dates: {written}", flush=True)

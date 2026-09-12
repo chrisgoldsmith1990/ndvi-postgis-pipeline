@@ -36,6 +36,27 @@ from src.yield_ranking import (
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 
 
+def _popup_curve_data(splines, pivot):
+    """Per-parcel dense curve + raw observed points, as GeoJSON-ready JSON
+    strings. Built per pin over that pin's own observed range (cs.x) rather
+    than one shared range for every parcel: since fit_splines now fits each
+    parcel on its own valid dates (parcels no longer all share one global
+    date set -- see its docstring), a shared range would show fabricated
+    values on dates a given parcel never actually cleared."""
+    rows = {}
+    for pin, cs in splines.items():
+        dense_doy = np.arange(int(cs.x.min()), int(cs.x.max()) + 1)
+        own_dates = pivot.loc[pin].dropna().sort_index().index
+        rows[pin] = {
+            "ndvi_dense_start_doy": int(dense_doy[0]),
+            "ndvi_dense": json.dumps([round(v, 3) for v in cs(dense_doy)]),
+            "ndvi_raw_doy": json.dumps([int(d) for d in cs.x]),
+            "ndvi_raw_dates": json.dumps([d.strftime("%Y-%m-%d") for d in own_dates]),
+            "ndvi_raw_values": json.dumps([round(v, 3) for v in cs(cs.x)]),
+        }
+    return pd.DataFrame.from_dict(rows, orient="index")
+
+
 def build_dataset():
     df = load_series()
     splines, doy, pivot = fit_splines(df)
@@ -46,7 +67,7 @@ def build_dataset():
     label_by_id = {cid: label_cluster(row) for cid, row in cluster_means.iterrows()}
     feats["cluster_label"] = feats["cluster"].map(label_by_id)
 
-    integrals = seasonal_ndvi_integral(splines, doy)
+    integrals = seasonal_ndvi_integral(splines)
     feats["seasonal_ndvi_integral"] = feats.index.map(integrals)
     feats = rank_within_cluster(feats)
     feats = estimate_yield_bu_ac(feats)
@@ -64,15 +85,11 @@ def build_dataset():
     gdf = gdf.merge(feats.reset_index().rename(columns={"index": "pin"}), on="pin")
 
     # Dense curve (one value per day, from the PCHIP fit) for a genuinely
-    # smooth line, plus the actual 8 raw measurements so the popup can
-    # still show what was measured vs. interpolated -- same distinction
+    # smooth line, plus the actual raw measurements so the popup can still
+    # show what was measured vs. interpolated -- same distinction
     # crop_clusters.png draws (thin line = fit, dots = observed).
-    dense_doy = np.arange(int(doy.min()), int(doy.max()) + 1)
-    gdf["ndvi_dense_start_doy"] = int(dense_doy.min())
-    gdf["ndvi_dense"] = gdf["pin"].map(lambda p: json.dumps([round(v, 3) for v in splines[p](dense_doy)]))
-    gdf["ndvi_raw_doy"] = json.dumps([int(d) for d in doy])
-    gdf["ndvi_raw_dates"] = json.dumps([d.strftime("%Y-%m-%d") for d in pivot.columns])
-    gdf["ndvi_raw_values"] = gdf["pin"].map(lambda p: json.dumps([round(v, 3) for v in pivot.loc[p].tolist()]))
+    popup_data = _popup_curve_data(splines, pivot)
+    gdf = gdf.merge(popup_data, left_on="pin", right_index=True)
     return gdf
 
 

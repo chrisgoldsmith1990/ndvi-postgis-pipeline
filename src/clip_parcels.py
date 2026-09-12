@@ -26,7 +26,7 @@ from shapely.geometry import LineString
 from sqlalchemy import text
 
 from src.db import get_engine
-from src.fetch_timeseries import SUBSET_BBOX
+from src.fetch_timeseries import COUNTY_BBOX, SUBSET_BBOX
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
@@ -42,18 +42,18 @@ WATERWAY_BUFFER_M = {"river": 8, "stream": 4, "ditch": 2, "drain": 2}
 DEFAULT_BUFFER_M = 5
 
 
-def fetch_osm_obstructions(bbox=SUBSET_BBOX):
+def fetch_osm_obstructions(bbox=SUBSET_BBOX, overpass_timeout=25, request_timeout=30):
     """Roads + waterways in the AOI from OpenStreetMap, each tagged with an
     approximate buffer half-width by class."""
     west, south, east, north = bbox
     query = (
-        f'[out:json][timeout:25];'
+        f'[out:json][timeout:{overpass_timeout}];'
         f'(way["highway"]({south},{west},{north},{east});'
         f'way["waterway"]({south},{west},{north},{east}););'
         f'out body;>;out skel qt;'
     )
     resp = requests.post(
-        OVERPASS_URL, data={"data": query}, timeout=30,
+        OVERPASS_URL, data={"data": query}, timeout=request_timeout,
         headers={"User-Agent": "ndvi-postgis-pipeline (portfolio project)"},
     )
     resp.raise_for_status()
@@ -103,7 +103,16 @@ def clip_parcels(pins, obstructions_table="osm_obstructions",
                   parcels_table="parcels", out_table="parcels_clipped"):
     """ST_Difference each parcel against the unioned, buffered obstructions.
     Buffering happens in geography (meters) then casts back to geometry for
-    the difference, since the source data is WGS84 lon/lat."""
+    the difference, since the source data is WGS84 lon/lat.
+
+    The county's own parcel data has a handful (4 of 9,578) of duplicate
+    PINs -- degenerate near-zero-area sliver records, and in one case what
+    looks like a real parcel split that kept the same PIN on both pieces.
+    Never surfaced before because no earlier step enforced one-row-per-pin.
+    Deduped here by keeping the largest-area record per PIN (DISTINCT ON),
+    which naturally drops the zero-area duplicates and, for the genuine
+    split, keeps the larger piece -- an acceptable simplification at this
+    scale (4 of 9,578 parcels)."""
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text(f"DROP TABLE IF EXISTS {out_table}"))
@@ -112,14 +121,19 @@ def clip_parcels(pins, obstructions_table="osm_obstructions",
             WITH obstruction_union AS (
                 SELECT ST_Union(ST_Buffer(geometry::geography, buffer_m)::geometry) AS geom
                 FROM {obstructions_table}
+            ),
+            deduped_parcels AS (
+                SELECT DISTINCT ON (pin) pin, geometry, computed_ac
+                FROM {parcels_table}
+                WHERE pin = ANY(:pins)
+                ORDER BY pin, ST_Area(geometry) DESC
             )
             SELECT p.pin,
                    ST_Difference(p.geometry, obstruction_union.geom) AS geometry,
                    ST_Area(ST_Difference(p.geometry, obstruction_union.geom)::geography) / 4046.8564224 AS clipped_acres,
                    p.computed_ac AS original_acres
-            FROM {parcels_table} p
+            FROM deduped_parcels p
             CROSS JOIN obstruction_union
-            WHERE p.pin = ANY(:pins)
         """), {"pins": list(pins)})
         conn.execute(text(f"CREATE INDEX {out_table}_geom_gist ON {out_table} USING GIST (geometry)"))
         conn.execute(text(f"ALTER TABLE {out_table} ADD PRIMARY KEY (pin)"))
@@ -134,11 +148,22 @@ def clip_parcels(pins, obstructions_table="osm_obstructions",
 
 
 if __name__ == "__main__":
-    from src.crop_clusters import load_series
+    import sys
 
-    df = load_series()
-    pins = df["pin"].unique().tolist()
+    if len(sys.argv) > 1 and sys.argv[1] == "county":
+        engine = get_engine()
+        with engine.begin() as conn:
+            pins = [row[0] for row in conn.execute(text("SELECT pin FROM parcels"))]
+        print(f"County mode: {len(pins)} parcels", flush=True)
+        features = fetch_osm_obstructions(bbox=COUNTY_BBOX, overpass_timeout=90, request_timeout=120)
+        load_obstructions(features, table_name="osm_obstructions_county")
+        clip_parcels(pins, obstructions_table="osm_obstructions_county",
+                      parcels_table="parcels", out_table="parcels_clipped_county")
+    else:
+        from src.crop_clusters import load_series
 
-    features = fetch_osm_obstructions()
-    load_obstructions(features)
-    clip_parcels(pins)
+        df = load_series()
+        pins = df["pin"].unique().tolist()
+        features = fetch_osm_obstructions()
+        load_obstructions(features)
+        clip_parcels(pins)

@@ -96,12 +96,26 @@ LITERATURE_CV = {
 }
 
 
-def seasonal_ndvi_integral(splines, doy):
+def seasonal_ndvi_integral(splines, doy=None):
     """Area under each parcel's fitted curve across the observed date
     range (trapezoidal integration of a fine grid) -- the season-long
-    biomass-accumulation proxy, not a single date's value."""
-    dense_doy = np.arange(int(doy.min()), int(doy.max()) + 1)
-    return {pin: np.trapezoid(cs(dense_doy), dense_doy) for pin, cs in splines.items()}
+    biomass-accumulation proxy, not a single date's value.
+
+    Integrates each parcel over its own domain (cs.x, the PchipInterpolator's
+    own breakpoints), not a shared global range: since fit_splines now fits
+    each parcel on its own valid dates (crop_clusters.fit_splines docstring),
+    a shared global range would run past a narrower parcel's own domain,
+    where extrapolate=False returns NaN and poisons the whole integral. This
+    means totals aren't directly comparable across parcels with very
+    different date spans -- rank_within_cluster compares parcels within
+    the same crop-type cluster, not season length, so this is an accepted
+    trade-off, not a bug. doy is accepted for backward compatibility but
+    unused."""
+    integrals = {}
+    for pin, cs in splines.items():
+        dense_doy = np.arange(int(cs.x.min()), int(cs.x.max()) + 1)
+        integrals[pin] = np.trapezoid(cs(dense_doy), dense_doy)
+    return integrals
 
 
 def rank_within_cluster(feats):
@@ -123,14 +137,14 @@ def estimate_yield_bu_ac(feats):
     return feats
 
 
-def fetch_acreage(pins):
+def fetch_acreage(pins, parcels_table="parcels_clipped"):
     """clipped_acres per parcel from parcels_clipped (see clip_parcels.py) --
     the actual crop-growing area with roads/waterways subtracted out, not
     the county's deeded acreage. The NDVI mean this estimate is built from
     was itself computed from those same clipped geometries, so using the
     clipped acreage here is what keeps rate x area internally consistent."""
     engine = get_engine()
-    query = text("SELECT pin, clipped_acres FROM parcels_clipped WHERE pin = ANY(:pins)")
+    query = text(f"SELECT pin, clipped_acres FROM {parcels_table} WHERE pin = ANY(:pins)")
     df = pd.read_sql(query, engine, params={"pins": list(pins)})
     return df.set_index("pin")["clipped_acres"]
 
@@ -146,7 +160,18 @@ def estimate_total_bushels(feats, acreage):
 
 
 if __name__ == "__main__":
-    df = load_series()
+    import sys
+
+    county = len(sys.argv) > 1 and sys.argv[1] == "county"
+    zonal_table = "ndvi_zonal_stats_county_clipped" if county else "ndvi_zonal_stats_subset_clipped"
+    parcels_table = "parcels_clipped_county" if county else "parcels_clipped"
+    out_csv = REPORTS_DIR / ("yield_ranking_county.csv" if county else "yield_ranking.csv")
+
+    # bad_dates defaults to BAD_DATES, the subset's own known-bad Sentinel-2
+    # date (2026-07-28) -- meaningless, and wrong, for the county table:
+    # that same date came back 48% clear over the whole county and was kept
+    # as a good candidate by fetch_timeseries.py's county-mode run.
+    df = load_series(table_name=zonal_table, bad_dates=frozenset() if county else None)
     splines, doy, pivot = fit_splines(df)
     feats = extract_features(splines, doy, pivot)
     feats, best_k = cluster(feats)
@@ -160,7 +185,7 @@ if __name__ == "__main__":
     feats["cluster_label"] = feats["cluster"].map(label_by_id)
     feats = estimate_yield_bu_ac(feats)
 
-    acreage = fetch_acreage(feats.index)
+    acreage = fetch_acreage(feats.index, parcels_table=parcels_table)
     feats = estimate_total_bushels(feats, acreage)
 
     print("Season-integrated NDVI stats by cluster:")
@@ -178,5 +203,5 @@ if __name__ == "__main__":
 
     out = feats[["cluster", "cluster_label", "seasonal_ndvi_integral", "percentile_in_cluster",
                  "acres", "estimated_yield_bu_ac", "estimated_total_bushels", "confidence"]]
-    out.to_csv(REPORTS_DIR / "yield_ranking.csv")
-    print(f"\nWrote {REPORTS_DIR / 'yield_ranking.csv'}", flush=True)
+    out.to_csv(out_csv)
+    print(f"\nWrote {out_csv}", flush=True)

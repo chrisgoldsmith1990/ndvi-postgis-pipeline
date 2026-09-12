@@ -46,6 +46,10 @@ COLLECTION = "sentinel-2-l2a"
 # non-cropland. Picked to keep this run fast and the resulting curves clean.
 SUBSET_BBOX = (-88.65, 40.65, -88.55, 40.72)
 
+# Whole McLean County, matching STUDY_AREA_BBOX in fetch_imagery.py -- used
+# once the subset pipeline is validated and scaled up to all ~9,578 parcels.
+COUNTY_BBOX = (-89.2966, 40.2673, -88.43, 40.7711)
+
 # L2A Scene Classification Layer codes that are NOT usable crop signal:
 # 0 no-data, 1 saturated/defective, 3 cloud shadow, 8/9 cloud (med/high
 # probability), 10 thin cirrus. Keeping the rest (vegetation, bare soil,
@@ -100,12 +104,25 @@ def _read_clipped(items, band_key, bbox):
     return mosaic[0], transform, crs
 
 
-def build_date(items, date, bbox=SUBSET_BBOX):
+def build_date(items, date, bbox=SUBSET_BBOX, raw_dir=RAW_DIR, max_bad_fraction=MAX_BAD_FRACTION):
     """Clip+mosaic red/NIR/SCL for one acquisition date, apply the cloud
     mask, and write red.tif/nir.tif with masked pixels zeroed out (the same
     nodata convention raw Sentinel-2 already uses, so compute_ndvi.py's
     existing (nir+red)==0 -> NaN logic picks it up with no changes needed).
     Returns None (writes nothing) if too much of the AOI is masked out.
+
+    max_bad_fraction is checked against the *whole AOI's* average -- fine at
+    subset scale (an 8km area is small enough that a cloud covering >35% of
+    it plausibly means the whole area is compromised), but wrong at county
+    scale: a cloud over one third of a 68x53km county can push the
+    aggregate over threshold while the other two-thirds sits perfectly
+    clear, and this check would then discard every parcel's data for the
+    date, not just the parcels actually under cloud. Per-pixel masking
+    below already handles partial contamination correctly (rasterstats'
+    NaN-aware zonal averaging naturally excludes masked pixels per parcel)
+    -- so at county scale this threshold should be raised close to 1.0,
+    rejecting a date only when there's genuinely nothing usable anywhere,
+    and letting the per-parcel math do the real filtering.
     """
     red, transform, crs = _read_clipped(items, "red", bbox)
     nir, _, _ = _read_clipped(items, "nir", bbox)
@@ -127,7 +144,7 @@ def build_date(items, date, bbox=SUBSET_BBOX):
 
     bad_mask = np.isin(scl, list(SCL_BAD_VALUES))
     bad_fraction = bad_mask.mean()
-    if bad_fraction > MAX_BAD_FRACTION:
+    if bad_fraction > max_bad_fraction:
         print(f"  {date}: {bad_fraction:.0%} cloud/shadow/nodata -- skipped", flush=True)
         return None
 
@@ -141,7 +158,7 @@ def build_date(items, date, bbox=SUBSET_BBOX):
         "height": red.shape[0], "width": red.shape[1],
         "crs": crs, "transform": transform,
     }
-    out_dir = RAW_DIR / str(date)
+    out_dir = raw_dir / str(date)
     out_dir.mkdir(parents=True, exist_ok=True)
     with rasterio.open(out_dir / "red.tif", "w", **profile) as dst:
         dst.write(red, 1)
@@ -152,10 +169,19 @@ def build_date(items, date, bbox=SUBSET_BBOX):
 
 
 if __name__ == "__main__":
-    by_date = find_season_items()
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "county":
+        # Reject only near-total cloud cover -- see build_date's docstring
+        # for why a whole-AOI aggregate threshold is wrong at this scale.
+        bbox, raw_dir, max_bad = COUNTY_BBOX, RAW_DIR / "county", 0.9
+    else:
+        bbox, raw_dir, max_bad = SUBSET_BBOX, RAW_DIR, MAX_BAD_FRACTION
+
+    by_date = find_season_items(bbox=bbox)
     written = []
     for date, items in by_date.items():
-        result = build_date(items, date)
+        result = build_date(items, date, bbox=bbox, raw_dir=raw_dir, max_bad_fraction=max_bad)
         if result is not None:
             written.append(str(date))
     print(f"\nWrote {len(written)}/{len(by_date)} candidate dates: {written}", flush=True)

@@ -102,37 +102,124 @@ REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 BAD_DATES = {"2026-07-28"}
 
 
-def load_series(table_name="ndvi_zonal_stats_subset_clipped"):
+def load_series(table_name="ndvi_zonal_stats_subset_clipped", bad_dates=None):
+    """bad_dates defaults to BAD_DATES (the subset's known-bad Sentinel-2
+    date) -- pass a different set (or empty) for a different table, since a
+    bad date found for one AOI/date-set isn't necessarily meaningful for
+    another. Check the new table's own date-by-date trajectory rather than
+    assuming this default applies."""
+    if bad_dates is None:
+        bad_dates = BAD_DATES
     engine = get_engine()
-    query = text(
-        f"SELECT pin, date, ndvi_mean FROM {table_name} "
-        f"WHERE ndvi_mean IS NOT NULL AND date NOT IN :bad_dates ORDER BY pin, date"
-    ).bindparams(bindparam("bad_dates", expanding=True))
-    df = pd.read_sql(query, engine, params={"bad_dates": list(BAD_DATES)})
+    # An empty bad_dates (the county table's default -- no known-bad dates
+    # yet) can't go through the expanding "NOT IN :bad_dates" bindparam:
+    # SQLAlchemy renders an empty expanding IN/NOT IN as a typed NULL
+    # subquery, and with no values to infer a type from it defaults to
+    # INTEGER, which then fails to compare against a date/text column
+    # ("operator does not exist: text = integer"). Skip the clause entirely
+    # instead of exercising that edge case.
+    if bad_dates:
+        query = text(
+            f"SELECT pin, date, ndvi_mean FROM {table_name} "
+            f"WHERE ndvi_mean IS NOT NULL AND date NOT IN :bad_dates ORDER BY pin, date"
+        ).bindparams(bindparam("bad_dates", expanding=True))
+        params = {"bad_dates": list(bad_dates)}
+    else:
+        query = text(f"SELECT pin, date, ndvi_mean FROM {table_name} WHERE ndvi_mean IS NOT NULL ORDER BY pin, date")
+        params = {}
+    df = pd.read_sql(query, engine, params=params)
     df["date"] = pd.to_datetime(df["date"])
     return df
 
 
-def fit_splines(df):
-    """One shape-preserving cubic (PCHIP) fit per parcel, over day-of-year.
-    Returns the spline dict and the shared doy array (all parcels share the
-    same 8 observed dates, so one grid works for all)."""
-    pivot = df.pivot(index="pin", columns="date", values="ndvi_mean").dropna()
-    dates = sorted(pivot.columns)
-    doy = np.array([d.dayofyear for d in dates])
+MIN_VALID_DATES = 6
+MIN_SEASON_SPAN_DAYS = 60
 
-    splines = {
-        pin: PchipInterpolator(doy, row.values.astype(float))
-        for pin, row in pivot.iterrows()
-    }
-    return splines, doy, pivot
+
+def fit_splines(df, min_valid_dates=MIN_VALID_DATES, min_season_span_days=MIN_SEASON_SPAN_DAYS):
+    """One shape-preserving cubic (PCHIP) fit per parcel, over day-of-year.
+
+    At subset scale every parcel shared the exact same handful of dates
+    (the county-wide cloud check was a whole-AOI aggregate, so a date either
+    cleared for everyone or nobody), and a strict dropna() complete-case
+    pivot was the right, simple choice. That whole-AOI assumption is what
+    the county-scale fetch fixed (see fetch_timeseries.build_date's
+    docstring): cloud cover is now checked and masked per-pixel, so which
+    dates are usable now genuinely varies parcel to parcel -- some sit under
+    a clear sky on 40 of the 43 fetched dates, others clear on 8. Requiring
+    one shared date list for all ~9,571 parcels would mean either dropping
+    almost every parcel (to the dates *everyone* has) or almost every date
+    (to parcels that happen to have all of them) -- neither is right when
+    the actual cloud pattern is genuinely parcel-specific.
+
+    So each parcel is fit on its own valid dates instead of a shared pivot,
+    and a parcel is excluded (not fit at all) rather than guessed at when
+    its own data can't support a real curve:
+    - min_valid_dates: below this, PCHIP is just connecting too few dots to
+      resolve the shape features below (green-up rate, decline rate) from
+      genuine curvature rather than noise between two points.
+    - min_season_span_days: count alone isn't enough -- a parcel with 8
+      clear dates all bunched into a 3-week window in June has no data
+      anywhere near green-up or senescence, so a peak-timing/decline-rate
+      read off that curve would be pure extrapolation dressed up as a fit.
+      Requiring the parcel's own first-to-last valid date to span most of
+      the season keeps only parcels whose curve actually covers the
+      transitions the crop-type signal depends on.
+    Excluded parcels are dropped silently here; the caller reports the
+    excluded count so it's visible, not swallowed.
+    """
+    long = df.dropna(subset=["ndvi_mean"]).copy()
+    long["doy"] = long["date"].dt.dayofyear
+
+    splines, kept_doy = {}, {}
+    excluded_count, excluded_short_span = 0, 0
+    for pin, group in long.groupby("pin"):
+        group = group.drop_duplicates(subset="doy").sort_values("doy")
+        if len(group) < min_valid_dates:
+            excluded_count += 1
+            continue
+        span = group["doy"].iloc[-1] - group["doy"].iloc[0]
+        if span < min_season_span_days:
+            excluded_count += 1
+            excluded_short_span += 1
+            continue
+        doy = group["doy"].to_numpy()
+        # extrapolate=False: features and plots below only ever evaluate a
+        # parcel's spline within its own observed range, but plot_clusters
+        # shares one dense grid across parcels with different ranges for the
+        # overlay -- outside its own domain that must come back NaN, not a
+        # silently extrapolated (and, for PCHIP past the boundary segment,
+        # potentially out-of-[0,1]) value.
+        splines[pin] = PchipInterpolator(doy, group["ndvi_mean"].to_numpy(dtype=float), extrapolate=False)
+        kept_doy[pin] = doy
+
+    print(f"  fit_splines: {len(splines)} parcels kept, {excluded_count} excluded "
+          f"({excluded_short_span} for season span, "
+          f"{excluded_count - excluded_short_span} for date count)", flush=True)
+
+    all_doy = np.array(sorted({d for arr in kept_doy.values() for d in arr}))
+    # Pivoted on the actual calendar date, not day-of-year: visualize_subset.py
+    # reads real dates back off these columns for the hover chart's raw-point
+    # labels, and day-of-year alone can't round-trip to a date without also
+    # knowing the year.
+    pivot = long[long["pin"].isin(splines)].pivot(index="pin", columns="date", values="ndvi_mean")
+    return splines, all_doy, pivot
 
 
 def extract_features(splines, doy, pivot, oversample_days=1):
-    dense_doy = np.arange(doy.min(), doy.max() + 1, oversample_days)
-
+    """doy is accepted for backward compatibility with existing callers but
+    is no longer used to build one shared grid: since fit_splines now fits
+    each parcel on its own valid dates (see its docstring), a shared grid
+    spanning the full season would evaluate parcels with a narrower own
+    range outside their domain, where extrapolate=False returns NaN. Each
+    parcel's dense grid is instead built from its own domain, read directly
+    off its PchipInterpolator's own breakpoints (cs.x) -- the pivot/doy
+    args are accepted for backward compatibility with existing callers but
+    no longer used."""
     rows = {}
     for pin, cs in splines.items():
+        own_doy = cs.x
+        dense_doy = np.arange(own_doy.min(), own_doy.max() + 1, oversample_days)
         curve = cs(dense_doy)
         deriv = cs(dense_doy, 1)
 
@@ -143,7 +230,7 @@ def extract_features(splines, doy, pivot, oversample_days=1):
         decline_rate = post_peak.min() if len(post_peak) else deriv.min()
 
         rows[pin] = {
-            "early_ndvi": pivot.loc[pin].iloc[0],
+            "early_ndvi": curve[0],
             "peak_ndvi": curve[peak_idx],
             "peak_doy": peak_doy,
             "green_up_rate": deriv.max(),
@@ -152,17 +239,22 @@ def extract_features(splines, doy, pivot, oversample_days=1):
     return pd.DataFrame.from_dict(rows, orient="index")
 
 
+NON_ROW_CROP_EARLY_NDVI = 0.3
+
+
 def label_cluster(row):
     """Behavioral label from a cluster's own feature means -- not a fixed
     ID mapping, since KMeans cluster numbering is arbitrary per run."""
-    if row["early_ndvi"] > 0.3:
+    if row["early_ndvi"] > NON_ROW_CROP_EARLY_NDVI:
         return "Non-row-crop (already green in April)"
     if row["peak_doy"] < 210:
         return "Corn-like (early peak, fast decline)"
     return "Soybean-like (later peak, slower decline)"
 
 
-def cluster(feats, k_range=range(2, 6), min_cluster_frac=0.05):
+def _fit_kmeans(feats, k_range, min_cluster_frac):
+    """One silhouette-selected KMeans fit, factored out of cluster() so it
+    can run twice (see cluster()'s docstring for why)."""
     X = StandardScaler().fit_transform(feats.values)
 
     # Silhouette alone rewards isolating a single extreme outlier as its own
@@ -193,6 +285,60 @@ def cluster(feats, k_range=range(2, 6), min_cluster_frac=0.05):
     return feats, best_k
 
 
+def cluster(feats, k_range=range(2, 6), min_cluster_frac=0.05,
+            non_row_crop_early_ndvi=NON_ROW_CROP_EARLY_NDVI):
+    """Two-stage split: first pull out non-row-crop parcels (already green
+    in April -- winter cover, pasture, hay) with the same deterministic
+    early_ndvi threshold label_cluster() itself checks first, then cluster
+    only the remaining row-crop parcels to find the corn/soybean
+    peak-timing split.
+
+    An earlier version tried to find *both* splits from one joint KMeans
+    fit across the whole population, which does not reliably work: on the
+    full McLean County run (~9,565 parcels), silhouette-based k-selection
+    over everyone together picked k=2 and lumped every row-crop parcel into
+    one undifferentiated cluster, identifying zero as corn-like, despite
+    the county being close to half corn by actual harvested acreage
+    (318,000 corn vs. 294,000 soybean acres, 2025 NASS) -- the early_ndvi
+    outlier split is a strong, high-variance single-axis signal that
+    silhouette prefers over the comparatively subtler peak-timing split. A
+    second attempt tried using KMeans itself (forced to k=2) to *find* the
+    non-row-crop split before re-clustering the rest, which fixed the
+    county run but doesn't generalize: at the ~163-parcel subset scale that
+    first k=2 fit split on a different, unrelated axis instead, leaving
+    almost nothing for the second stage. A fixed threshold on early_ndvi
+    sidesteps both failure modes -- it's already how label_cluster() names
+    the resulting clusters after the fact, so applying it before clustering
+    too, to actually perform the split, is consistent rather than hoping
+    an unsupervised fit rediscovers the same rule on its own.
+
+    Confidence for the non-row-crop decision isn't from a KMeans margin
+    (there's no fit backing this split), so it's read directly off how far
+    a parcel's own early_ndvi sits from the threshold relative to the
+    population's spread -- clipped to the same [0.5, 1.0] bound
+    assignment_confidence uses, so the two are on a comparable scale even
+    though they come from different mechanisms.
+    """
+    is_non_row_crop = feats["early_ndvi"] > non_row_crop_early_ndvi
+    std = feats["early_ndvi"].std()
+    margin = (feats["early_ndvi"] - non_row_crop_early_ndvi).abs() / (std if std > 0 else 1)
+
+    non_row_crop = feats[is_non_row_crop].copy()
+    non_row_crop["cluster"] = 0
+    non_row_crop["confidence"] = np.clip(0.5 + margin[is_non_row_crop], 0.5, 1.0)
+
+    row_crop = feats.loc[~is_non_row_crop, feats.columns]
+    stage2, best_k = _fit_kmeans(row_crop, k_range=k_range, min_cluster_frac=min_cluster_frac)
+    stage2["cluster"] = stage2["cluster"] + 1  # +1 so ids never collide with non-row-crop's 0
+
+    print(f"Non-row-crop split (early_ndvi > {non_row_crop_early_ndvi}): "
+          f"{len(non_row_crop)} non-row-crop, {len(stage2)} row-crop "
+          f"-> KMeans best_k={best_k} on row-crop", flush=True)
+
+    result = pd.concat([non_row_crop, stage2])
+    return result.loc[feats.index], best_k
+
+
 def assignment_confidence(X, model):
     """How much closer each point is to its assigned cluster's centroid than
     to the next-closest one, in the same standardized space KMeans itself
@@ -219,14 +365,19 @@ def plot_spline_sample(splines, doy, pivot, out_path, n=12, seed=0):
 
     import matplotlib.pyplot as plt
 
-    dense_doy = np.linspace(doy.min(), doy.max(), 300)
     pins = random.Random(seed).sample(list(splines.keys()), min(n, len(splines)))
 
     fig, ax = plt.subplots(figsize=(9, 6))
     for pin in pins:
         cs = splines[pin]
+        own_doy = cs.x
+        dense_doy = np.linspace(own_doy.min(), own_doy.max(), 300)
         line, = ax.plot(dense_doy, cs(dense_doy), linewidth=1, alpha=0.7)
-        ax.scatter(doy, pivot.loc[pin].values, color=line.get_color(), s=15, zorder=3)
+        # cs(own_doy) reproduces the original measured values exactly (PCHIP
+        # interpolates through its own data points) -- reading straight off
+        # the spline's own breakpoints instead of pivot avoids any mismatch
+        # from the dedup a duplicate-doy date could cause in fit_splines.
+        ax.scatter(own_doy, cs(own_doy), color=line.get_color(), s=15, zorder=3)
     ax.set_xlabel("Day of year")
     ax.set_ylabel("NDVI")
     ax.set_title(f"Cubic spline fit, {len(pins)} sample parcels (dots = observed dates)")
@@ -246,8 +397,12 @@ def plot_clusters(splines, doy, feats, out_path):
     for cluster_id, group in feats.groupby("cluster"):
         color = colors[cluster_id % len(colors)]
         for pin in group.index:
+            # extrapolate=False (fit_splines) means this is NaN, hence a
+            # plotted gap, outside this parcel's own observed range -- a
+            # true reflection of what's actually known about that parcel,
+            # not a manufactured curve on unobserved dates.
             ax.plot(dense_doy, splines[pin](dense_doy), color=color, alpha=0.15, linewidth=1)
-        mean_curve = np.mean([splines[pin](dense_doy) for pin in group.index], axis=0)
+        mean_curve = np.nanmean([splines[pin](dense_doy) for pin in group.index], axis=0)
         ax.plot(dense_doy, mean_curve, color=color, linewidth=3,
                  label=f"Group {cluster_id} (n={len(group)})")
 
@@ -264,7 +419,8 @@ def plot_clusters(splines, doy, feats, out_path):
 if __name__ == "__main__":
     df = load_series()
     splines, doy, pivot = fit_splines(df)
-    print(f"{len(splines)} parcels with complete {len(doy)}-date series, spline-fit over day-of-year {list(doy)}", flush=True)
+    print(f"{len(splines)} parcels kept, {len(doy)} distinct days-of-year observed "
+          f"across them (day-of-year range {doy.min()}-{doy.max()})", flush=True)
 
     plot_spline_sample(splines, doy, pivot, REPORTS_DIR / "subset_spline_fit.png")
 

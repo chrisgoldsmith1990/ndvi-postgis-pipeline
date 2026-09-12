@@ -39,6 +39,15 @@ def compute_zonal_stats(ndvi_path, parcels_table="parcels"):
         raster_crs = src.crs
     parcels = parcels.to_crs(raster_crs)
 
+    # A parcel fully consumed by the roads/waterways clip (clip_parcels.py)
+    # has a null or empty geometry -- no area, so no pixels to average, but
+    # rasterstats' shape() crashes on None rather than returning NaN for it.
+    # Skip those here and NaN-fill them back in, rather than let one non-crop
+    # sliver from ST_Difference kill the whole date's zonal-stats run.
+    has_geom = parcels.geometry.notna() & ~parcels.geometry.is_empty
+    empty_pins = parcels.loc[~has_geom, "pin"]
+    parcels = parcels.loc[has_geom]
+
     stats = rasterstats.zonal_stats(
         parcels.geometry,
         ndvi_path,
@@ -48,6 +57,10 @@ def compute_zonal_stats(ndvi_path, parcels_table="parcels"):
     )
     result = pd.DataFrame(stats).add_prefix("ndvi_")
     result["pin"] = parcels["pin"].values
+
+    if len(empty_pins):
+        empty_rows = pd.DataFrame({"pin": empty_pins.values})
+        result = pd.concat([result, empty_rows], ignore_index=True)
     return result
 
 
