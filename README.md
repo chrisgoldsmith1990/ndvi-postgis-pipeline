@@ -617,6 +617,23 @@ within rounding of the target every time (32.0% on the subset, 31.7% on
 the county, against a 31.7% target) rather than being at the mercy of
 wherever the largest tied block happens to sit.
 
+**A third quantization problem, reported directly by clicking around the
+live map:** confidence values on the interactive map only ever showed 3
+distinct numbers across dozens of clicked parcels. Same root cause as the
+two problems above, showing up a third way: the popup's confidence was a
+margin computed from raw `peak_doy` against the split threshold, and since
+`peak_doy` collapses to a handful of distinct values across thousands of
+parcels, so did that margin — checked directly, corn-like parcels had
+only 5 distinct confidence values across 2,500 of them, soybean-like only
+3 across 5,386 (non-row-crop, whose confidence comes from the continuous
+`early_ndvi` level rather than `peak_doy`, correctly showed hundreds).
+Fixed by computing confidence from *rank position* in the same
+peak_doy/green_up_rate order that actually decides the split, rather than
+raw peak_doy: distance from the boundary rank, normalized to [0.5, 1.0].
+Since green_up_rate is continuous, this gives an effectively unique value
+per parcel — every one of the 2,500 corn-like and 5,386 soybean-like
+county parcels now has its own distinct confidence, instead of 5 and 3.
+
 **Adopted:** `crop_clusters.py` now defaults to EVI2
 (`evi2_zonal_stats_*` tables) with `CORN_SOYBEAN_PEAK_DOY_PERCENTILE =
 31.7`, applied to each run's own row-crop `peak_doy` distribution (ties

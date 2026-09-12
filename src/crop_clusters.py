@@ -466,13 +466,26 @@ def cluster(feats, non_row_crop_early_ndvi=NON_ROW_CROP_EARLY_NDVI,
     n_corn = round(len(row_crop) * corn_soybean_peak_doy_percentile / 100)
     is_corn = row_crop.index.isin(ordered.index[:n_corn])
     row_crop["cluster"] = np.where(is_corn, 1, 2)
-    # Confidence still reads as a margin from an absolute peak_doy value
-    # (the boundary value closest to the target percentile), for a
-    # human-interpretable "how many days from the cutoff" reading, even
-    # though ties right at that value were broken by green_up_rate.
-    peak_doy_threshold = row_crop.loc[is_corn, "peak_doy"].max() if is_corn.any() else row_crop["peak_doy"].min()
-    row_crop["confidence"] = threshold_confidence(row_crop["peak_doy"], peak_doy_threshold)
 
+    # Confidence as distance from the decision boundary in *rank* space
+    # (position in the same peak_doy/green_up_rate order that actually
+    # decided the split), not a margin on raw peak_doy: peak_doy alone is
+    # so heavily tied (large blocks of parcels sharing one exact value --
+    # see above) that a peak_doy-based margin collapsed to only 3-5
+    # distinct confidence values across thousands of row-crop parcels,
+    # found by a direct report that clicking ~30 parcels only ever showed
+    # 50%, 76%, or 100%. Confidence should read as "how far into its own
+    # side of the split is this parcel," and rank position -- effectively
+    # unique per parcel once green_up_rate (a continuous value) breaks
+    # peak_doy ties -- actually varies parcel to parcel where the raw
+    # value didn't.
+    position = pd.Series(range(len(ordered)), index=ordered.index)
+    boundary = n_corn - 0.5  # midpoint between the last corn rank and first soybean rank
+    max_dist = max(boundary, len(row_crop) - 1 - boundary)
+    rank_margin = (position.reindex(row_crop.index) - boundary).abs() / (max_dist if max_dist > 0 else 1)
+    row_crop["confidence"] = np.clip(0.5 + 0.5 * rank_margin, 0.5, 1.0)
+
+    peak_doy_threshold = row_crop.loc[is_corn, "peak_doy"].max() if is_corn.any() else row_crop["peak_doy"].min()
     print(f"Non-row-crop split (early_ndvi > {non_row_crop_early_ndvi}): "
           f"{len(non_row_crop)} non-row-crop, {len(row_crop)} row-crop "
           f"-> corn/soybean split (target {corn_soybean_peak_doy_percentile}th percentile, "
