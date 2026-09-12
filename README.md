@@ -94,7 +94,7 @@ it's the query planner's job and a five-line query.
 | 6 | Time series + anomaly flag | [`src/anomaly.py`](src/anomaly.py) |
 | 7 | This README | — |
 | — | County map (static + interactive), the payoff of 4-6 | [`src/visualize.py`](src/visualize.py) |
-| — | Crop-type curve-shape clustering (subset area) | [`src/fetch_timeseries.py`](src/fetch_timeseries.py), [`src/crop_clusters.py`](src/crop_clusters.py), [`src/visualize_subset.py`](src/visualize_subset.py) — see [below](#crop-type-exploration-subset-area) |
+| — | Crop-type curve-shape clustering (subset area) | [`src/fetch_timeseries.py`](src/fetch_timeseries.py), [`src/fetch_hls.py`](src/fetch_hls.py), [`src/clip_parcels.py`](src/clip_parcels.py), [`src/crop_clusters.py`](src/crop_clusters.py), [`src/visualize_subset.py`](src/visualize_subset.py) — see [below](#crop-type-exploration-subset-area) |
 
 ## Study area
 
@@ -211,11 +211,13 @@ just level — distinguish what's actually growing in a field? Corn and
 soybean have different phenology (corn greens up faster and peaks earlier;
 soybean climbs more gradually and peaks later), which is the same signal
 USDA's own Cropland Data Layer is built on. Scoped to a small rural subset
-(125–163 parcels, depending on date coverage) rather than the full county,
+(122–163 parcels, depending on date coverage) rather than the full county,
 since this needs every available date across the season, not monthly
-composites — [`src/fetch_timeseries.py`](src/fetch_timeseries.py),
-[`src/crop_clusters.py`](src/crop_clusters.py),
-[`src/visualize_subset.py`](src/visualize_subset.py).
+composites — [`src/fetch_timeseries.py`](src/fetch_timeseries.py) and
+[`src/fetch_hls.py`](src/fetch_hls.py) for imagery,
+[`src/clip_parcels.py`](src/clip_parcels.py) for the road/waterway
+correction below, [`src/crop_clusters.py`](src/crop_clusters.py) for the
+clustering, [`src/visualize_subset.py`](src/visualize_subset.py) for the map.
 
 **[Interactive map](https://chrisgoldsmith1990.github.io/ndvi-postgis-pipeline/reports/subset_crop_map.html)** —
 tap any parcel for its NDVI curve, behavioral cluster, and an assignment
@@ -239,6 +241,43 @@ year behind the crop it describes — the newest available CDL right now is
 for last year, not this year — and corn/soybean rotation means a
 year-old label can be wrong for the current season on any given field.
 That's a real constraint on validating this, not an oversight.)
+
+**Densifying with a second sensor** ([`src/fetch_hls.py`](src/fetch_hls.py)) —
+Sentinel-2 alone only cleared 8 usable dates out of 41 candidate passes this
+season. NASA's Harmonized Landsat Sentinel-2 (HLS) product is built
+specifically to be numerically comparable to Sentinel-2 surface
+reflectance and shares its MGRS tiling, so NDVI from either sensor slots
+into the same time series without rescaling. Adding HLS-L30 (Landsat)
+recovered 8 more usable dates — nearly doubling the season to 18 —
+including one right inside what was previously a blind gap, and two
+adjacent-day cross-sensor pairs that agree almost exactly (Aug 22
+Sentinel-2 vs. Aug 23 Landsat: 0.895 vs. 0.894 mean NDVI).
+
+Getting there required diagnosing a real, non-obvious bug: `rasterio`/GDAL's
+generic HTTP streaming driver hangs indefinitely on Azure Blob Storage's
+SAS-token-authenticated URLs (Planetary Computer's access method for HLS),
+ignoring configured timeouts — confirmed by isolating each step (a plain
+STAC search and a plain token-signing request both complete in under a
+second on their own; only `rasterio.open()` on the signed URL itself
+hangs). The fix: download each band fully via plain `requests` first, then
+open the local file with `rasterio`, sidestepping GDAL's streaming path
+entirely. Also worth noting: HLS surface reflectance occasionally produces
+individual pixels with NDVI outside the theoretically valid [-1, 1] range
+(atmospheric-correction artifacts at dark/shadow-edge pixels) — `compute_ndvi.py`
+now clips to that range, though empirically it never changed a parcel's
+zonal mean for this dataset; the artifact pixels are too few to move an
+average of hundreds.
+
+Honest result of the density increase: real curve texture is visible now
+that wasn't with 8-10 sparse points (a shared dip across all three
+clusters around day 165-170, likely an actual short-term weather effect,
+not a fitting artifact) — the corn/soybean early-vs-late-peak story still
+holds directionally. But the aggregate silhouette score actually *dropped*
+slightly (0.385 → 0.338) rather than improving. More temporal resolution
+made the picture more detailed, not more separable — combining two
+sensors' worth of real day-to-day variation adds genuine texture that a
+clean 3-cluster model doesn't perfectly capture. Reported as-is rather
+than only reporting the version that looked best.
 
 **Yield ranking** ([`src/yield_ranking.py`](src/yield_ranking.py)) —
 ranks each parcel's season-integrated NDVI against others in its own

@@ -22,6 +22,15 @@ def compute_ndvi(red_path, nir_path, out_path):
 
     denom = nir + red
     ndvi = np.where(denom == 0, np.nan, (nir - red) / denom)
+    # NDVI is bounded [-1, 1] by definition; a value outside that range is
+    # necessarily an artifact (e.g. atmospheric-correction algorithms can
+    # produce small negative reflectance at individual dark/shadow-edge
+    # pixels, which the ratio can amplify past the theoretical bound), not
+    # a real vegetation signal. Seen in practice on HLS Landsat scenes
+    # (max NDVI up to 1.18 pre-clip) -- doesn't change any parcel's zonal
+    # mean for this dataset (the offending pixels are too few and get
+    # averaged out), but clipping is the principled fix regardless.
+    ndvi = np.clip(ndvi, -1.0, 1.0)
 
     profile.update(dtype="float32", count=1, nodata=np.nan)
     out_path.parent.mkdir(parents=True, exist_ok=True)
