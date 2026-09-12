@@ -48,18 +48,7 @@ def sign_href(href):
     return f"{href}?{resp.json()['token']}"
 
 
-def fetch_cdl_raster(bbox, year, request_timeout=60):
-    """Downloads the classified cropland raster (not the 'cultivated' or
-    'frequency' layers -- see the usda-cdl collection's item types) for the
-    given bbox/year, full download via requests (not GDAL streaming --
-    same Azure SAS hang as fetch_hls.py), and returns the local path."""
-    catalog = Client.open(STAC_URL)
-    search = catalog.search(collections=[COLLECTION], bbox=bbox, datetime=f"{year}-01-01/{year}-12-31")
-    items = [i for i in search.items() if i.properties.get("usda_cdl:type") == "cropland"]
-    if not items:
-        raise ValueError(f"No CDL cropland item found for {year} at bbox {bbox}")
-    item = items[0]
-
+def _download_tile(item, request_timeout):
     out_path = DOWNLOAD_CACHE / f"{item.id}_cropland.tif"
     if out_path.exists():
         return out_path
@@ -70,7 +59,56 @@ def fetch_cdl_raster(bbox, year, request_timeout=60):
     with open(out_path, "wb") as f:
         for chunk in resp.iter_content(chunk_size=1024 * 1024):
             f.write(chunk)
-    print(f"Downloaded CDL {year} cropland raster: {out_path}", flush=True)
+    print(f"Downloaded CDL cropland tile: {out_path}", flush=True)
+    return out_path
+
+
+def fetch_cdl_raster(bbox, year, request_timeout=60):
+    """Downloads the classified cropland raster (not the 'cultivated' or
+    'frequency' layers -- see the usda-cdl collection's item types) for the
+    given bbox/year, full download via requests (not GDAL streaming --
+    same Azure SAS hang as fetch_hls.py), and returns the local path.
+
+    Single-tile only -- use fetch_cdl_mosaic for a bbox (e.g. the whole
+    county) that spans more than one CDL tile."""
+    catalog = Client.open(STAC_URL)
+    search = catalog.search(collections=[COLLECTION], bbox=bbox, datetime=f"{year}-01-01/{year}-12-31")
+    items = [i for i in search.items() if i.properties.get("usda_cdl:type") == "cropland"]
+    if not items:
+        raise ValueError(f"No CDL cropland item found for {year} at bbox {bbox}")
+    return _download_tile(items[0], request_timeout)
+
+
+def fetch_cdl_mosaic(bbox, year, request_timeout=60):
+    """Like fetch_cdl_raster, but downloads and mosaics *every* CDL tile
+    intersecting bbox -- McLean County itself straddles a CDL tile
+    boundary (checked directly: 2 tiles cover the county bbox, not 1), so
+    a single-tile fetch would silently miss part of the county."""
+    import rasterio
+    from rasterio.merge import merge
+
+    catalog = Client.open(STAC_URL)
+    search = catalog.search(collections=[COLLECTION], bbox=bbox, datetime=f"{year}-01-01/{year}-12-31")
+    items = [i for i in search.items() if i.properties.get("usda_cdl:type") == "cropland"]
+    if not items:
+        raise ValueError(f"No CDL cropland item found for {year} at bbox {bbox}")
+
+    tile_paths = [_download_tile(item, request_timeout) for item in items]
+    out_path = DOWNLOAD_CACHE / f"mosaic_{year}_{len(tile_paths)}tiles.tif"
+    if out_path.exists():
+        return out_path
+
+    srcs = [rasterio.open(p) for p in tile_paths]
+    try:
+        mosaic, transform = merge(srcs)
+        profile = srcs[0].profile.copy()
+    finally:
+        for src in srcs:
+            src.close()
+    profile.update(height=mosaic.shape[1], width=mosaic.shape[2], transform=transform)
+    with rasterio.open(out_path, "w", **profile) as dst:
+        dst.write(mosaic)
+    print(f"Wrote CDL mosaic ({len(tile_paths)} tiles): {out_path}", flush=True)
     return out_path
 
 

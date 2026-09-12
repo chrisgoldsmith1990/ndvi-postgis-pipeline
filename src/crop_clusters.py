@@ -1,17 +1,23 @@
-"""Crop-type work, unsupervised: cluster parcels by NDVI curve *shape*
-rather than a single date's value -- the whole premise from the start of
-this thread is that corn and soybean (and other land uses) differ in when
-and how fast they green up and senesce, not in what NDVI they happen to
-hit on any one day.
+"""Crop-type work: cluster parcels by curve *shape* rather than a single
+date's value -- the whole premise from the start of this thread is that
+corn and soybean (and other land uses) differ in when and how fast they
+green up and senesce, not in what index value they happen to hit on any
+one day.
 
-No ground truth exists for this subset, so clusters are reported as
-behavioral groups (A/B/C), not labeled "corn"/"soybean" -- the peak-timing
-split does match the literature direction (corn peaks earlier than
-soybean), but that's a prior, not a validated label. Labeling is a
-separate, later decision (e.g. cross-referencing CDL, itself lagged a
-full year -- see README).
+Started fully unsupervised (no ground truth, clusters reported as
+behavioral groups rather than validated "corn"/"soybean" labels) but is
+no longer: this module's corn/soybean split (CORN_SOYBEAN_COEF, in
+cluster() below) is a logistic regression fit against real USDA CDL
+ground truth -- see validate_against_cdl.py and the README's "Validating
+against real ground truth" section for the full methodology and the
+several real, evidence-driven corrections that produced it. The
+non-row-crop split (NON_ROW_CROP_EARLY_NDVI) remains an unvalidated,
+threshold-based prior in the sense described below.
 
-Defaults to ndvi_zonal_stats_subset_clipped (see clip_parcels.py), computed
+Defaults to evi2_zonal_stats_subset_clipped (see clip_parcels.py for the
+parcels_clipped geometry, load_series() for the EVI2-vs-NDVI table
+default -- EVI2 outperformed NDVI once validated against real CDL labels,
+see the README), computed
 against parcel geometries with roads/waterways subtracted out via
 ST_Difference -- a parcel's tax boundary can include a road or stream
 running through the field itself, and those pixels read as pavement/water,
@@ -332,40 +338,81 @@ def extract_features(splines, kept_series, oversample_days=1):
     return pd.DataFrame.from_dict(rows, orient="index")
 
 
-# Validated against real USDA CDL 2021 ground truth for the subset area
-# (validate_against_cdl.py): a straight peak_doy sweep against 161
-# CDL-labeled Corn/Soybean parcels, 5-fold cross-validated, picked an
-# absolute cutoff of 186 in *every* fold with zero variance -- 87.6%
-# accuracy (EVI2), vs. 77.0% at the previous hand-picked 210.
+# This went through three real, evidence-driven iterations, each one
+# found by actually deploying the previous version rather than trusting
+# validation numbers alone -- see validate_against_cdl.py for the
+# methodology (past-season imagery capped at the current season's
+# day-of-year reach, validated against that same season's real USDA CDL
+# labels, so there's no crop-rotation ambiguity and no lookahead).
 #
-# That absolute day-of-year cutoff does NOT transfer across seasons,
-# though -- found out by actually deploying it, not just assumed: applying
-# 186 unchanged to the 2026 season identified only 2 of 150 row-crop
-# parcels as corn (vs. 43-67 expected), because peak_doy isn't a clean
-# biological measurement independent of when the satellite happened to
-# have a clear pass -- it's frequently the exact date of whichever
-# observation caught each parcel's true peak, and that date shifts with
-# each season's own cloud pattern. Confirmed directly: 2021's row-crop
-# peak_doy distribution clusters at day 185 -- July 4, 2021, an actual
-# fetched date -- while 2026's clusters at day 195 -- July 14, 2026,
-# also an actual fetched date. A fixed absolute day threshold tuned on one
-# year's specific observation calendar doesn't generalize to a different
-# year's different calendar.
+# v1 -- absolute peak_doy threshold. Cross-validated against the 163-parcel
+# SUBSET's CDL labels: 186 won every fold, 87.6% accuracy. Applying it
+# unchanged to 2026 found only 2 of 150 corn-like parcels (vs. 40-60
+# expected): peak_doy is frequently just the date of whichever satellite
+# pass caught a parcel's true peak, and that date shifts every season, so
+# a fixed calendar day doesn't transfer.
 #
-# Fix: use the *percentile* of the validation season's row-crop
-# population that threshold 186 corresponded to (31.7%, not the 41.6%
-# true CDL corn fraction -- accuracy-maximizing thresholds needn't
-# preserve the marginal class split), and apply that percentile to each
-# season's *own* peak_doy distribution at runtime instead of a fixed
-# absolute day. This is the assumption that actually needs to hold for
-# year-to-year transfer to work: not that corn peaks on the same calendar
-# day every year, but that corn's peak-timing *rank* within that season's
-# row-crop population is stable -- consistent with corn's real agronomic
-# earlier-peak relationship to soybean, which is about relative timing,
-# not an absolute date. Applying this to 2026 gives 43 of 150 corn-like --
-# far more plausible than the absolute version's 2, and consistent with
-# CDL 2021's real ~42% corn share.
-CORN_SOYBEAN_PEAK_DOY_PERCENTILE = 31.7
+# v2 -- percentile of peak_doy, not an absolute day (31.7th percentile,
+# what 186 corresponded to on the subset). Fixed the season-to-season
+# transfer problem, but exposed a bigger one: validated on the full
+# COUNTY's real CDL labels (8,202 parcels, not the subset's 163), peak_doy
+# alone only reaches 63.8% cross-validated accuracy, with the actual
+# optimal cutoff at the 66.6th percentile, not 31.7 -- nearly inverted.
+# The subset's 87.6% was never representative: its own true CDL corn
+# fraction (41.6%) doesn't even match the county's real acreage split
+# (~52%), because a small rural cluster chosen for fetch cost, not
+# representativeness, just happens to have a different local rotation mix.
+# Deploying a percentile calibrated there was always going to bias the
+# whole county's aggregate split, no matter how well peak_doy's *rank*
+# supposedly transferred -- confirmed directly: 2026's county-wide split
+# came out 31.7% corn against a real ~52%.
+#
+# v3 -- a proper multi-feature model, fit on the representative
+# county-wide sample. peak_doy's weakness at county scale traces to the
+# same quantization problem documented throughout this module (huge blocks
+# of parcels tied to one calendar date), but two other features turned out
+# to separate corn from soybean far more cleanly there: peak_ndvi (mean
+# 0.700 corn vs. 0.797 soybean -- corn's canopy structure caps out lower)
+# and green_up_rate (already established: corn rises faster). A logistic
+# regression on all 5 features, cross-validated on the same 8,202-parcel
+# county sample, reaches 80.5% (+/- 0.7%) -- beating peak_ndvi alone
+# (77.0%) and far beating peak_doy alone (63.8%). This *reverses* the
+# subset-scale finding that more features hurt (a 5-feature model
+# underperformed a single threshold there) -- expected, not a
+# contradiction: 161 samples isn't enough to reliably fit 5 coefficients,
+# 8,202 is. Fit on raw (absolute) feature values, predicted corn fraction
+# on that same 2021 training data was 47.9%, closely tracking the true
+# 48.6%.
+#
+# v4 (current) -- same model, refit on each feature *standardized against
+# its own season's row-crop population* (z-score: (value - that season's
+# mean) / that season's std) rather than raw absolute values. Needed
+# because v3, deployed on 2026, only produced 37.6% corn against the
+# expected ~52% -- checked directly rather than assumed, and found a real
+# season-to-season shift: 2026's row-crop peak_ndvi averages 0.793 vs.
+# 2021's 0.737 (roughly half a standard deviation higher), and peak_ndvi
+# carries the largest weight in the model, so that shift alone biased
+# every 2026 prediction toward soybean. This is the same lesson as
+# CORN_SOYBEAN_PEAK_DOY_PERCENTILE's abandoned absolute-day threshold,
+# generalized: a raw feature value isn't comparable across seasons with
+# different overall imagery/atmospheric conditions, but a value's position
+# *relative to that season's own distribution* is more likely to be.
+# Standardizing preserved cross-validated accuracy on 2021 (80.65% vs.
+# 80.54%, no real change) while fixing the 2026 deployment: corn share
+# moved from 37.6% to 56.1%, much closer to the real ~52% acreage split.
+# Standardization at inference time uses each run's own row-crop
+# population mean/std (see cluster() below), computed fresh every run --
+# there's no fixed, portable "mean EVI2 value" to hardcode any more than
+# there was a fixed peak_doy.
+CORN_SOYBEAN_FEATURES = ["early_ndvi", "peak_ndvi", "peak_doy", "green_up_rate", "decline_rate"]
+CORN_SOYBEAN_COEF = {
+    "early_ndvi": -0.2223,
+    "peak_ndvi": -2.0819,
+    "peak_doy": -1.3480,
+    "green_up_rate": 0.0775,
+    "decline_rate": -0.3817,
+}
+CORN_SOYBEAN_INTERCEPT = 0.4298
 
 # NDVI's 0.3 non-row-crop cutoff doesn't transfer to EVI2's naturally lower
 # scale (EVI2 reads systematically lower than NDVI for the same
@@ -393,37 +440,23 @@ CLUSTER_LABELS = {
 }
 
 
-def cluster(feats, non_row_crop_early_ndvi=NON_ROW_CROP_EARLY_NDVI,
-            corn_soybean_peak_doy_percentile=CORN_SOYBEAN_PEAK_DOY_PERCENTILE):
-    """Two deterministic threshold splits, not KMeans: non-row-crop vs.
-    row-crop on early_ndvi (an absolute level), then corn-like vs.
-    soybean-like on peak_doy within row-crop -- but the peak_doy split is
-    a *percentile* of this call's own row-crop population, not a fixed
-    calendar day. See CORN_SOYBEAN_PEAK_DOY_PERCENTILE's comment for why:
-    an absolute day-of-year threshold, cross-validated against real CDL
-    ground truth, still failed to transfer from its validation season to a
-    different one, because which day captures each parcel's true peak
-    shifts with each season's own cloud pattern. The percentile is what
-    was actually validated to hold across a season change; the absolute
-    day was not.
+def cluster(feats, non_row_crop_early_ndvi=NON_ROW_CROP_EARLY_NDVI):
+    """Non-row-crop vs. row-crop on early_ndvi (a deterministic threshold),
+    then corn-like vs. soybean-like within row-crop via the logistic
+    regression fit described at CORN_SOYBEAN_COEF -- not a KMeans fit, and
+    not a single-feature threshold either (see that comment for why both
+    were tried and replaced).
 
-    This replaces an earlier KMeans-based version of the row-crop split,
-    which was a different algorithm from what was actually validated in
-    the first place: KMeans groups parcels by overall curve shape across 5
-    features, then label_cluster() named the resulting *cluster means* --
-    but a cluster's mean peak_doy landing on one side of a threshold says
-    nothing about where each individual member's own peak_doy falls, so
-    parcels could get bulk-labeled against the very rule that was
-    cross-validated per-parcel. That KMeans stage was also the fix for a
-    real, earlier bug (a single joint fit across the whole population
-    picked k=2 and found zero corn-like parcels at county scale, since the
-    early_ndvi outlier split dominated silhouette over the subtler
-    peak-timing one) -- but a deterministic threshold sidesteps that
-    failure mode too, while actually matching the validated method.
-
-    Confidence for both decisions comes from the same margin-based
-    mechanism: how far a parcel's own value sits from its threshold
-    relative to the population's spread, clipped to [0.5, 1.0].
+    Confidence for the non-row-crop decision is a margin-based mechanism:
+    how far a parcel's own early_ndvi sits from the threshold relative to
+    the population's spread, clipped to [0.5, 1.0]. Confidence for
+    corn/soybean is the logistic model's own predicted probability for
+    whichever label it assigned (max(p, 1-p)) -- genuinely continuous by
+    construction, unlike the single-feature threshold versions this
+    replaced, where a margin computed from heavily-quantized peak_doy
+    alone collapsed to only 3-5 distinct values across thousands of
+    parcels (found by a direct report that clicking ~30 parcels on the
+    live map only ever showed 3 confidence numbers).
     """
     def threshold_confidence(series, threshold):
         std = series.std()
@@ -438,58 +471,24 @@ def cluster(feats, non_row_crop_early_ndvi=NON_ROW_CROP_EARLY_NDVI,
     non_row_crop["confidence"] = threshold_confidence(non_row_crop["early_ndvi"], non_row_crop_early_ndvi)
 
     row_crop = feats[~is_non_row_crop].copy()
-    # peak_doy is heavily quantized -- many parcels' PCHIP peak lands
-    # exactly on whichever calendar date happened to catch their true
-    # peak, so large blocks of parcels can share the exact same value (one
-    # county-wide run found 1,957 of ~7,900 row-crop parcels sharing a
-    # single peak_doy). That block alone spans ~24% of the population --
-    # bigger than the gap between the achievable splits on either side of
-    # it (~21% excluding it entirely vs. ~45% including it whole), so no
-    # tie-handling rule based on peak_doy *alone* can land near the target
-    # percentile when the target happens to fall inside a block that
-    # large: rounding the whole tied block one way or the other is the
-    # only two options peak_doy alone offers.
-    #
-    # Broken by green_up_rate as a secondary sort key within ties: corn's
-    # real, validated signal is a faster green-up, not merely an earlier
-    # peak (confirmed against CDL 2021 ground truth -- corn's mean
-    # green_up_rate is 0.026 vs. soybean's 0.021), so ranking a tied block
-    # by descending green_up_rate and taking however many of its members
-    # are needed to hit the target percentile is a principled way to use
-    # information the model already trusts elsewhere, not an arbitrary
-    # tie-break. (The tie-breaking power specifically at the exact
-    # boundary value couldn't be directly confirmed against CDL --  too
-    # few ground-truth parcels fell in that narrow window -- so this
-    # extends a validated *population-level* relationship into an
-    # unvalidated but well-motivated regime, not a fully proven claim.)
-    ordered = row_crop.sort_values(["peak_doy", "green_up_rate"], ascending=[True, False])
-    n_corn = round(len(row_crop) * corn_soybean_peak_doy_percentile / 100)
-    is_corn = row_crop.index.isin(ordered.index[:n_corn])
+    # Standardized against THIS run's own row-crop population (not a fixed
+    # mean/std baked into the model) -- see CORN_SOYBEAN_COEF's comment:
+    # raw feature values shift season to season (2026's peak_ndvi ran
+    # ~0.056 higher than the 2021 season the model was fit on), but each
+    # value's position relative to its own season's distribution held up.
+    standardized = (row_crop[CORN_SOYBEAN_FEATURES] - row_crop[CORN_SOYBEAN_FEATURES].mean()) \
+        / row_crop[CORN_SOYBEAN_FEATURES].std()
+    score = CORN_SOYBEAN_INTERCEPT + sum(
+        CORN_SOYBEAN_COEF[col] * standardized[col] for col in CORN_SOYBEAN_FEATURES
+    )
+    p_corn = 1 / (1 + np.exp(-score))
+    is_corn = p_corn >= 0.5
     row_crop["cluster"] = np.where(is_corn, 1, 2)
+    row_crop["confidence"] = np.where(is_corn, p_corn, 1 - p_corn)
 
-    # Confidence as distance from the decision boundary in *rank* space
-    # (position in the same peak_doy/green_up_rate order that actually
-    # decided the split), not a margin on raw peak_doy: peak_doy alone is
-    # so heavily tied (large blocks of parcels sharing one exact value --
-    # see above) that a peak_doy-based margin collapsed to only 3-5
-    # distinct confidence values across thousands of row-crop parcels,
-    # found by a direct report that clicking ~30 parcels only ever showed
-    # 50%, 76%, or 100%. Confidence should read as "how far into its own
-    # side of the split is this parcel," and rank position -- effectively
-    # unique per parcel once green_up_rate (a continuous value) breaks
-    # peak_doy ties -- actually varies parcel to parcel where the raw
-    # value didn't.
-    position = pd.Series(range(len(ordered)), index=ordered.index)
-    boundary = n_corn - 0.5  # midpoint between the last corn rank and first soybean rank
-    max_dist = max(boundary, len(row_crop) - 1 - boundary)
-    rank_margin = (position.reindex(row_crop.index) - boundary).abs() / (max_dist if max_dist > 0 else 1)
-    row_crop["confidence"] = np.clip(0.5 + 0.5 * rank_margin, 0.5, 1.0)
-
-    peak_doy_threshold = row_crop.loc[is_corn, "peak_doy"].max() if is_corn.any() else row_crop["peak_doy"].min()
     print(f"Non-row-crop split (early_ndvi > {non_row_crop_early_ndvi}): "
           f"{len(non_row_crop)} non-row-crop, {len(row_crop)} row-crop "
-          f"-> corn/soybean split (target {corn_soybean_peak_doy_percentile}th percentile, "
-          f"realized boundary peak_doy~{peak_doy_threshold:.0f}): "
+          f"-> corn/soybean split (logistic model): "
           f"{int(is_corn.sum())} corn-like ({100 * is_corn.mean():.1f}%), "
           f"{int((~is_corn).sum())} soybean-like", flush=True)
 

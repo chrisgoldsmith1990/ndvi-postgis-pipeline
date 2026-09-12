@@ -401,15 +401,16 @@ entirely at the smaller subset scale, leaving almost nothing for the
 second stage — the deterministic threshold is what actually generalizes
 across both scales.
 
-**Result:** 2,500 corn-like, 5,386 soybean-like, 1,372 non-row-crop, out of
-9,258 clustered parcels. (This is the CDL-validated EVI2 + percentile
-classifier's split, documented further down — see "Validating against
-real ground truth" below. It superseded an earlier NDVI-based figure of
-3,128/4,734/1,396 reported when this section was first written; the
-county's real corn/soybean acreage is close to even, but the validated
-classifier's own split need not exactly match acreage, since it's
-optimized for per-parcel accuracy against real labels, not for matching
-the county-wide total.)
+**Result:** 4,426 corn-like, 3,460 soybean-like, 1,372 non-row-crop, out of
+9,258 clustered parcels — 55.2% of row-crop acreage corn, against a real
+2025 baseline of ~52%. (This is the final CDL-validated logistic
+regression classifier's split, documented in full further down — see
+"Validating against real ground truth" below, which also covers two
+earlier, less accurate versions of this split that were shipped and then
+superseded after actually deploying them surfaced real problems: an
+NDVI-based figure of 3,128/4,734/1,396, then an EVI2+percentile figure of
+2,500/5,386/1,372, both reported at earlier points while this section was
+being written.)
 
 ![McLean County crop-type clusters, full county](reports/county_crop_map.png)
 
@@ -634,24 +635,101 @@ Since green_up_rate is continuous, this gives an effectively unique value
 per parcel — every one of the 2,500 corn-like and 5,386 soybean-like
 county parcels now has its own distinct confidence, instead of 5 and 3.
 
-**Adopted:** `crop_clusters.py` now defaults to EVI2
-(`evi2_zonal_stats_*` tables) with `CORN_SOYBEAN_PEAK_DOY_PERCENTILE =
-31.7`, applied to each run's own row-crop `peak_doy` distribution (ties
-broken by `green_up_rate`), for the crop-type pipeline specifically.
-`visualize.py`'s separate anomaly-detection map is unaffected — this
-finding is about distinguishing corn from soybean by curve shape, not
-about field-health monitoring, and NDVI remains the right, more
-field-tested choice there. The corn/soybean split no longer uses KMeans
-at all (an earlier version did, then named the resulting cluster means)
-— it's two deterministic threshold rules now, matching exactly what was
-actually validated rather than approximating it through an unsupervised
-intermediate step whose cluster boundaries weren't guaranteed to land on
-the validated cutoff. The non-row-crop threshold (`NON_ROW_CROP_EARLY_NDVI`,
-now 0.19 for EVI2's scale) stays an absolute value, not a percentile: it
-measures an EVI2 *level* (how green a parcel is in early spring), not a calendar day, so
-it isn't exposed to the same observation-date-sensitivity problem — but
-it's also calibrated by percentile-matching to the old NDVI threshold's
-split size rather than independently cross-validated the same way, since
-CDL 2021 only had 2 true "Other" parcels in this subset, too few to
-validate a threshold against (though both of those 2 parcels' values do
-fall on the correct side of 0.19, weak corroboration rather than proof).
+The percentile fix above shipped as "adopted" — until deploying it at full
+county scale surfaced a problem none of the subset-scale validation could
+have caught, because it wasn't about tie-handling or season transfer at
+all: **the subset itself was never a representative sample.**
+
+**Validating at county scale instead of the subset — because a small
+rural cluster isn't the county.** The 163-parcel subset's own true CDL
+corn fraction was 41.6% (67 of 161 labeled Corn/Soybean parcels) — but
+McLean County's real 2025 harvested acreage was split almost evenly,
+~52% corn. A percentile calibrated on an area that happens to run more
+soybean-heavy than the county average was always going to under-call corn
+everywhere else, no matter how well its *rank* transferred across
+seasons. Confirmed directly: deploying the percentile model at full
+county scale gave 31.7% corn against a real ~52%. Fixed the sample, not
+just the method — fetched a second, county-wide 2021 validation season
+(46 dates, same DOY cap logic, this time against the county's actual max
+day-of-year reach of 249) and a county-wide CDL mosaic (McLean County
+straddles a CDL tile boundary — 2 tiles, downloaded and merged with
+`rasterio.merge`, the same pattern `fetch_timeseries.py` already uses for
+Sentinel-2 tiles). This gave 8,202 CDL-labeled Corn/Soybean parcels — 50x
+the subset's sample, and a true corn fraction of 48.6%, in line with the
+real acreage split.
+
+**That bigger, representative sample overturned the model, not just the
+calibration.** Re-validating `peak_doy` alone against these 8,202 real
+labels found it a genuinely weak signal at this scale: only 63.8%
+cross-validated accuracy, with the true optimal cutoff at the 66.6th
+percentile — nearly the *opposite* of 31.7%. The subset's 87.6% was never
+a property of the method; it was a property of a small, homogeneous
+sample where `peak_doy`'s quantization problem happened not to bite hard.
+Two other features turned out to separate corn from soybean far more
+cleanly across the full county: `peak_ndvi` (mean 0.700 for corn vs. 0.797
+for soybean — corn's canopy structure caps out lower at full closure) and
+`green_up_rate` (already established: corn rises faster). A 5-feature
+logistic regression reached 80.5% (± 0.7%) cross-validated — beating
+`peak_ndvi` alone (77.0%) and far beating `peak_doy` alone (63.8%). This
+*reverses* the subset-scale finding that more features hurt (there, a
+5-feature model underperformed a single threshold) — not a contradiction:
+161 samples isn't enough to reliably fit 5 coefficients, 8,202 is.
+
+**Even the validated multi-feature model didn't transfer at first — found,
+again, by actually deploying it.** Fit on 2021's raw feature values and
+applied to 2026, it produced only 37.6% corn, still well short of the
+expected ~52%. Checked directly rather than assumed: 2026's row-crop
+`peak_ndvi` averages 0.793 versus 2021's 0.737 — roughly half a standard
+deviation higher, a real season-to-season shift, most likely in overall
+atmospheric conditions or sensor calibration rather than actual crop
+biology. Since `peak_ndvi` carries the model's largest weight, that shift
+alone biased every 2026 prediction toward soybean. Same lesson as the
+abandoned absolute-day threshold, generalized: a raw feature value isn't
+reliably comparable across seasons with different overall imagery
+conditions, but a value's position *relative to that season's own
+distribution* is more likely to be. Refit on each feature standardized
+against its own season's row-crop population (z-score against that
+season's own mean/std, computed fresh at runtime, not a fixed baseline) —
+preserved 2021 cross-validated accuracy (80.65% vs. 80.54%, no real
+change) while moving the 2026 deployment result from 37.6% to 56.1% corn,
+much closer to the real ~52%.
+
+**Final validated result:**
+
+| | Accuracy source | Cross-validated accuracy |
+|---|---|---|
+| `peak_doy` alone (subset, unrepresentative) | 163 parcels | 87.6% |
+| `peak_doy` alone (county, representative) | 8,202 parcels | 63.8% |
+| `peak_ndvi` alone (county) | 8,202 parcels | 77.0% |
+| 5-feature logistic regression, raw values (county) | 8,202 parcels | 80.5% |
+| 5-feature logistic regression, standardized (county) | 8,202 parcels | **80.65%** |
+
+| 2026 county-wide result | Parcels | Acres |
+|---|---|---|
+| Corn-like | 4,426 | 343,527 |
+| Soybean-like | 3,460 | 278,353 |
+| Non-row-crop | 1,372 | 61,128 |
+
+Corn's share of row-crop acreage: **55.2%**, against a real 2025 baseline
+of ~52% — within a few points, not the original 20-point gap.
+
+**Adopted:** `crop_clusters.py`'s `cluster()` now assigns corn vs. soybean
+with a logistic regression (`CORN_SOYBEAN_COEF`/`CORN_SOYBEAN_INTERCEPT`)
+over all 5 curve-shape features, standardized against each run's own
+row-crop population at call time — not a fixed threshold, not a
+percentile, not KMeans. Confidence for this decision is the model's own
+predicted probability (`max(p, 1-p)`), which also incidentally fixed the
+earlier confidence-quantization problem: a smooth logistic score over 5
+continuous features doesn't collapse to a handful of values the way a
+margin on `peak_doy` alone did. The non-row-crop threshold
+(`NON_ROW_CROP_EARLY_NDVI`, 0.19 for EVI2's scale) is unchanged from
+before — it's a level, not a calendar day or a model needing
+cross-season recalibration, so it wasn't exposed to any of the problems
+above. `src/validate_against_cdl.py` now supports both `subset` and
+`county` scopes (`python -m src.validate_against_cdl county`) and keeps
+the full v1→v4 methodology runnable end to end: fetch a past season
+capped at the current season's day-of-year reach, fetch real CDL ground
+truth (single-tile or mosaic), and validate. `visualize.py`'s separate
+NDVI-based anomaly-detection map is unaffected throughout all of this —
+every finding here is about distinguishing corn from soybean by curve
+shape, not about field-health monitoring.

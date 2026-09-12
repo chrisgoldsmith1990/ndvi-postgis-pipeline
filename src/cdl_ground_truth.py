@@ -29,8 +29,15 @@ def load_cdl_ground_truth(cdl_path, parcels_table="parcels_clipped", pins=None):
         raster_crs = src.crs
     parcels = parcels.to_crs(raster_crs)
 
+    # Same empty-geometry issue as zonal_stats.py: a parcel fully consumed
+    # by the roads/waterways clip has a null/empty geometry, which crashes
+    # rasterstats' shape() rather than returning NaN for it.
+    has_geom = parcels.geometry.notna() & ~parcels.geometry.is_empty
+    empty_pins = parcels.loc[~has_geom, "pin"]
+    parcels = parcels.loc[has_geom]
+
     stats = rasterstats.zonal_stats(parcels.geometry, cdl_path, categorical=True, nodata=0)
-    rows = []
+    rows = [{"pin": pin, "cdl_code": None, "cdl_label": None, "cdl_purity": None} for pin in empty_pins]
     for pin, s in zip(parcels["pin"], stats):
         if not s:
             rows.append({"pin": pin, "cdl_code": None, "cdl_label": None, "cdl_purity": None})
