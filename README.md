@@ -251,10 +251,35 @@ by real published models' coefficient of variation (Johnson et al. 2021,
 corn, only R²=0.54 for soybean) — but the rate alone isn't the estimate
 that matters, since parcels in this subset range from a dozen to well
 over a hundred acres. The actual reported estimate is **total bushels**:
-that rate multiplied by the parcel's own acreage (`computed_ac`, the same
-field `load_boundaries.py` loads from the county parcel layer). This is
-explicitly an approximation — it borrows a cited relationship's *spread*,
-not a fitted equation specific to this subset — and should be trusted
-much less for the soybean-like majority of parcels than for the corn-like
-ones, per the source paper's
-own finding.
+that rate multiplied by the parcel's *clipped* acreage (see below — the
+crop-growing area with roads/waterways subtracted out, not the county's
+raw deeded acreage). This is explicitly an approximation — it borrows a
+cited relationship's *spread*, not a fitted equation specific to this
+subset — and should be trusted much less for the soybean-like majority of
+parcels than for the corn-like ones, per the source paper's own finding.
+
+**Road/waterway clipping** ([`src/clip_parcels.py`](src/clip_parcels.py)) —
+a parcel's tax-boundary polygon can include a road or stream running
+through the field itself, and those pixels read as pavement or water, not
+crop, dragging the zonal-stats NDVI mean along with them. Real, not
+hypothetical: the subset area has 44 actual OpenStreetMap road/waterway
+segments crossing its ~163 parcels. Fetches them from OSM's public
+Overpass API, buffers each by an approximate right-of-way/channel width
+(class-based assumptions — OSM doesn't carry real width for rural roads),
+and subtracts the union from every parcel via PostGIS `ST_Difference` into
+a `parcels_clipped` table — the same "PostGIS does the spatial-set work"
+split used everywhere else here.
+
+The effect is real and physically sensible, confirmed by comparing
+clipped vs. unclipped NDVI directly: in spring (bare soil), clipping
+*lowers* the mean slightly — removing already-green ditch-bank vegetation
+from an otherwise bare field; in summer (mature canopy), clipping
+*raises* it — removing low-NDVI pavement from a green field. One small
+parcel where a road/stream eats 7.5% of its area shows up to a 0.049 NDVI
+shift depending on date. But rerunning the full clustering pipeline on
+clipped vs. unclipped data reassigns only 2 of 125 parcels and leaves
+silhouette/confidence essentially unchanged — the correction matters for
+per-parcel precision (and now feeds the yield estimate's acreage), not
+for the aggregate corn/soybean story, which turns out to be robust to it.
+`ndvi_zonal_stats_subset_clipped` is now the default the crop-type
+pipeline reads from.

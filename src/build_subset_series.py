@@ -18,7 +18,11 @@ from src.zonal_stats import compute_zonal_stats, load_zonal_stats
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SUBSET_TABLE = "ndvi_zonal_stats_subset"
 
-if __name__ == "__main__":
+
+def run(parcels_table="parcels", zonal_table=SUBSET_TABLE, recompute_ndvi=True):
+    """NDVI + zonal stats for every fetch_timeseries.py date, against
+    whichever parcels table is given -- e.g. parcels_clipped once
+    clip_parcels.py has run, to compare against the unclipped baseline."""
     # data/raw/ also holds the old monthly composites ("2026-06", 7 chars)
     # from fetch_imagery.py -- only process fetch_timeseries.py's full-date
     # ("2026-04-09", 10 chars) directories here.
@@ -30,9 +34,14 @@ if __name__ == "__main__":
             continue
 
         ndvi_path = DATA_DIR / "processed" / date / "ndvi.tif"
-        compute_ndvi(red, nir, ndvi_path)
+        if recompute_ndvi or not ndvi_path.exists():
+            compute_ndvi(red, nir, ndvi_path)
 
-        result = compute_zonal_stats(ndvi_path)
+        result = compute_zonal_stats(ndvi_path, parcels_table=parcels_table)
         valid = result["ndvi_mean"].notna().sum()
-        print(f"{date}: {valid} parcels with valid NDVI coverage", flush=True)
-        load_zonal_stats(result, date, table_name=SUBSET_TABLE)
+        print(f"{date}: {valid} parcels with valid NDVI coverage ({parcels_table})", flush=True)
+        load_zonal_stats(result, date, table_name=zonal_table)
+
+
+if __name__ == "__main__":
+    run()

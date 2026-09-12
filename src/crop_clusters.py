@@ -11,6 +11,18 @@ soybean), but that's a prior, not a validated label. Labeling is a
 separate, later decision (e.g. cross-referencing CDL, itself lagged a
 full year -- see README).
 
+Defaults to ndvi_zonal_stats_subset_clipped (see clip_parcels.py), computed
+against parcel geometries with roads/waterways subtracted out via
+ST_Difference -- a parcel's tax boundary can include a road or stream
+running through the field itself, and those pixels read as pavement/water,
+not crop. Confirmed as a real, physically sensible effect (pavement drags
+summer NDVI down, green ditch-banks drag spring NDVI up, both up to ~0.05
+NDVI on the most-affected parcel) but not one that changes the crop-type
+story: clustering on clipped vs. unclipped data reassigns only 2 of 125
+parcels and leaves silhouette/confidence essentially unchanged -- the
+correction matters for per-parcel precision (feeds directly into
+yield_ranking.py's acreage-based estimate), not for the aggregate split.
+
 Only 8 dates survived cloud/shadow filtering out of 41 candidate Sentinel-2
 passes this season at the strict (20% bad-pixel) threshold -- confirmed by
 re-running the search with no whole-tile cloud pre-filter at all, the other
@@ -90,11 +102,11 @@ REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 BAD_DATES = {"2026-07-28"}
 
 
-def load_series():
+def load_series(table_name="ndvi_zonal_stats_subset_clipped"):
     engine = get_engine()
     query = text(
-        "SELECT pin, date, ndvi_mean FROM ndvi_zonal_stats_subset "
-        "WHERE ndvi_mean IS NOT NULL AND date NOT IN :bad_dates ORDER BY pin, date"
+        f"SELECT pin, date, ndvi_mean FROM {table_name} "
+        f"WHERE ndvi_mean IS NOT NULL AND date NOT IN :bad_dates ORDER BY pin, date"
     ).bindparams(bindparam("bad_dates", expanding=True))
     df = pd.read_sql(query, engine, params={"bad_dates": list(BAD_DATES)})
     df["date"] = pd.to_datetime(df["date"])

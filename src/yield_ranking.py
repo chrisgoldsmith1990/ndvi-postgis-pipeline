@@ -62,9 +62,11 @@ exact fitted equation.
 
 A bu/ac rate alone doesn't say what a field actually produces: parcels in
 this subset range from about a dozen to well over a hundred acres. The
-number that matters is bu/ac x the parcel's own acreage (`computed_ac`
-from the parcels table, the same acreage field load_boundaries.py loads
-from the county's parcel layer).
+number that matters is bu/ac x the parcel's own acreage -- specifically
+`clipped_acres` from parcels_clipped (see clip_parcels.py), the crop-
+growing area with roads/waterways subtracted out, not the county's raw
+deeded acreage. The NDVI mean itself was computed from those same clipped
+geometries, so this is what keeps rate x area internally consistent.
 """
 
 from pathlib import Path
@@ -122,12 +124,15 @@ def estimate_yield_bu_ac(feats):
 
 
 def fetch_acreage(pins):
-    """computed_ac per parcel from the parcels table -- the same acreage
-    field load_boundaries.py loads from the county's parcel layer."""
+    """clipped_acres per parcel from parcels_clipped (see clip_parcels.py) --
+    the actual crop-growing area with roads/waterways subtracted out, not
+    the county's deeded acreage. The NDVI mean this estimate is built from
+    was itself computed from those same clipped geometries, so using the
+    clipped acreage here is what keeps rate x area internally consistent."""
     engine = get_engine()
-    query = text("SELECT pin, computed_ac FROM parcels WHERE pin = ANY(:pins)")
+    query = text("SELECT pin, clipped_acres FROM parcels_clipped WHERE pin = ANY(:pins)")
     df = pd.read_sql(query, engine, params={"pins": list(pins)})
-    return df.set_index("pin")["computed_ac"]
+    return df.set_index("pin")["clipped_acres"]
 
 
 def estimate_total_bushels(feats, acreage):

@@ -54,8 +54,11 @@ def build_dataset():
 
     engine = get_engine()
     pins = feats.index.tolist()
+    # parcels_clipped, not parcels: shows the actual crop-growing area the
+    # NDVI mean and yield estimate were computed from (roads/waterways cut
+    # out via clip_parcels.py), not the county's raw deeded boundary.
     gdf = gpd.read_postgis(
-        text("SELECT pin, geometry FROM parcels WHERE pin = ANY(:pins)"),
+        text("SELECT pin, geometry FROM parcels_clipped WHERE pin = ANY(:pins)"),
         engine, params={"pins": pins}, geom_col="geometry",
     )
     gdf = gdf.merge(feats.reset_index().rename(columns={"index": "pin"}), on="pin")
