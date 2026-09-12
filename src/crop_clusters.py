@@ -122,22 +122,43 @@ def cluster(feats, k_range=range(2, 6), min_cluster_frac=0.05):
     # k's where every cluster holds a meaningful share of the data (>=5%)
     # picks the interpretable split instead of the technically-optimal one.
     min_size = max(3, int(min_cluster_frac * len(feats)))
-    scores, labels_by_k = {}, {}
+    scores, labels_by_k, model_by_k = {}, {}, {}
     for k in k_range:
-        labels = KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(X)
+        model = KMeans(n_clusters=k, n_init=10, random_state=0).fit(X)
+        labels = model.labels_
         counts = np.bincount(labels)
         if counts.min() < min_size:
             print(f"  k={k}: rejected, smallest cluster only {counts.min()} parcels", flush=True)
             continue
         scores[k] = silhouette_score(X, labels)
         labels_by_k[k] = labels
+        model_by_k[k] = model
     best_k = max(scores, key=scores.get)
     print("Silhouette scores by k (viable only):", {k: round(v, 3) for k, v in scores.items()})
     print(f"Best k = {best_k}", flush=True)
 
     feats = feats.copy()
     feats["cluster"] = labels_by_k[best_k]
+    feats["confidence"] = assignment_confidence(X, model_by_k[best_k])
     return feats, best_k
+
+
+def assignment_confidence(X, model):
+    """How much closer each point is to its assigned cluster's centroid than
+    to the next-closest one, in the same standardized space KMeans itself
+    uses -- not a calibrated probability, but a direct, honest read of how
+    ambiguous a call actually was. distance_to_own is always <= the second-
+    smallest distance by construction (KMeans assigns to the nearest
+    centroid), so this is bounded [0.5, 1.0]: 0.5 is an exact tie between
+    two groups, 1.0 is unambiguous. Generalizes to k>2 by comparing against
+    whichever *other* centroid is nearest, not an average of all of them --
+    a point near the boundary of two of three groups is genuinely
+    ambiguous even if it's far from the third.
+    """
+    dists = np.linalg.norm(X[:, None, :] - model.cluster_centers_[None, :, :], axis=2)
+    sorted_dists = np.sort(dists, axis=1)
+    d_own, d_next = sorted_dists[:, 0], sorted_dists[:, 1]
+    return d_next / (d_own + d_next)
 
 
 def plot_spline_sample(splines, doy, pivot, out_path, n=12, seed=0):

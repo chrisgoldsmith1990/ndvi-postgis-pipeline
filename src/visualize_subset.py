@@ -1,7 +1,8 @@
 """Interactive map for the crop-type subset area: each parcel colored by
 its behavioral cluster from crop_clusters.py, with its actual measured
-NDVI season curve and a plain-language cluster description on both hover
-and click.
+NDVI season curve, a plain-language cluster description, and an assignment
+confidence (how much closer to its own cluster than the next-closest one --
+see crop_clusters.assignment_confidence) on click.
 
 Separate from visualize.py's county-wide map -- different area (163
 parcels vs 9,578), different question (crop-type clustering vs anomaly
@@ -97,8 +98,16 @@ function bindSubsetPopups(map) {
             var dense = JSON.parse(props.ndvi_dense);
             var rawDoy = JSON.parse(props.ndvi_raw_doy);
             var rawValues = JSON.parse(props.ndvi_raw_values);
+            var confPct = Math.round(props.confidence * 100);
+            // Bounded [50, 100] by construction (see assignment_confidence
+            // in crop_clusters.py) -- these cutoffs are just for readability,
+            // not a claim about statistical significance.
+            var confColor = confPct >= 75 ? '#2c7a3f' : (confPct >= 60 ? '#e67e22' : '#c0392b');
+            var confWord = confPct >= 75 ? 'high' : (confPct >= 60 ? 'moderate' : 'low');
             var html = '<b>Parcel ' + props.pin + '</b><br>' +
                         '<b>' + props.cluster_label + '</b><br>' +
+                        '<span style="color:' + confColor + '">' + confPct + '% confidence (' + confWord + ')</span>' +
+                        ' vs. next-closest group<br>' +
                         ndviSmoothSparklineSvg(dense, props.ndvi_dense_start_doy, rawDoy, rawValues);
             layer.bindPopup(html);
         }
