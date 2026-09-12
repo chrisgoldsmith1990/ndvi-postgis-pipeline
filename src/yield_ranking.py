@@ -96,24 +96,24 @@ LITERATURE_CV = {
 }
 
 
-def seasonal_ndvi_integral(splines, doy=None):
+def seasonal_ndvi_integral(splines, kept_series):
     """Area under each parcel's fitted curve across the observed date
     range (trapezoidal integration of a fine grid) -- the season-long
     biomass-accumulation proxy, not a single date's value.
 
-    Integrates each parcel over its own domain (cs.x, the PchipInterpolator's
-    own breakpoints), not a shared global range: since fit_splines now fits
-    each parcel on its own valid dates (crop_clusters.fit_splines docstring),
-    a shared global range would run past a narrower parcel's own domain,
-    where extrapolate=False returns NaN and poisons the whole integral. This
-    means totals aren't directly comparable across parcels with very
-    different date spans -- rank_within_cluster compares parcels within
-    the same crop-type cluster, not season length, so this is an accepted
-    trade-off, not a bug. doy is accepted for backward compatibility but
-    unused."""
+    Integrates each parcel over its own domain (kept_series, from
+    crop_clusters.fit_splines -- its own outlier-rejected doy values), not
+    a shared global range: since fit_splines fits each parcel on its own
+    valid dates (see its docstring), a shared global range would run past a
+    narrower parcel's own domain, extrapolating a smoothing spline beyond
+    the data it was actually fit on. This means totals aren't directly
+    comparable across parcels with very different date spans --
+    rank_within_cluster compares parcels within the same crop-type cluster,
+    not season length, so this is an accepted trade-off, not a bug."""
     integrals = {}
     for pin, cs in splines.items():
-        dense_doy = np.arange(int(cs.x.min()), int(cs.x.max()) + 1)
+        own_doy, _ = kept_series[pin]
+        dense_doy = np.arange(int(own_doy.min()), int(own_doy.max()) + 1)
         integrals[pin] = np.trapezoid(cs(dense_doy), dense_doy)
     return integrals
 
@@ -172,11 +172,21 @@ if __name__ == "__main__":
     # that same date came back 48% clear over the whole county and was kept
     # as a good candidate by fetch_timeseries.py's county-mode run.
     df = load_series(table_name=zonal_table, bad_dates=frozenset() if county else None)
-    splines, doy, pivot = fit_splines(df)
-    feats = extract_features(splines, doy, pivot)
+    if county:
+        # Bloomington/Normal parcels excluded before clustering/yield
+        # estimation, not just hidden on a map -- see exclude_urban.py.
+        # Requires `python -m src.exclude_urban` to have populated the
+        # urban_areas table first.
+        from src.exclude_urban import filter_rural
+        before = df["pin"].nunique()
+        df = filter_rural(df, parcels_table=parcels_table)
+        print(f"Urban exclusion: {before - df['pin'].nunique()} parcels dropped "
+              f"(inside Bloomington/Normal city limits)", flush=True)
+    splines, kept_series = fit_splines(df)
+    feats = extract_features(splines, kept_series)
     feats, best_k = cluster(feats)
 
-    integrals = seasonal_ndvi_integral(splines, doy)
+    integrals = seasonal_ndvi_integral(splines, kept_series)
     feats["seasonal_ndvi_integral"] = feats.index.map(integrals)
     feats = rank_within_cluster(feats)
 

@@ -38,6 +38,7 @@ from src.crop_clusters import (
     popup_curve_data,
 )
 from src.db import get_engine
+from src.exclude_urban import filter_rural
 from src.yield_ranking import (
     estimate_total_bushels,
     estimate_yield_bu_ac,
@@ -56,17 +57,26 @@ CLUSTER_COLORS = {
 
 
 def build_dataset(zonal_table="ndvi_zonal_stats_county_clipped",
-                   parcels_table="parcels_clipped_county", bad_dates=frozenset()):
+                   parcels_table="parcels_clipped_county", bad_dates=frozenset(), exclude_urban=True):
     df = load_series(table_name=zonal_table, bad_dates=bad_dates)
-    splines, doy, pivot = fit_splines(df)
-    feats = extract_features(splines, doy, pivot)
+    if exclude_urban:
+        # Bloomington/Normal parcels excluded before clustering, not just
+        # hidden on the map afterward -- see exclude_urban.py. Requires
+        # `python -m src.exclude_urban` to have populated the urban_areas
+        # table first.
+        before = df["pin"].nunique()
+        df = filter_rural(df, parcels_table=parcels_table)
+        print(f"Urban exclusion: {before - df['pin'].nunique()} parcels dropped "
+              f"(inside Bloomington/Normal city limits)", flush=True)
+    splines, kept_series = fit_splines(df)
+    feats = extract_features(splines, kept_series)
     feats, best_k = cluster(feats)
 
     cluster_means = feats.groupby("cluster").mean()
     label_by_id = {cid: label_cluster(row) for cid, row in cluster_means.iterrows()}
     feats["cluster_label"] = feats["cluster"].map(label_by_id)
 
-    integrals = seasonal_ndvi_integral(splines)
+    integrals = seasonal_ndvi_integral(splines, kept_series)
     feats["seasonal_ndvi_integral"] = feats.index.map(integrals)
     feats = rank_within_cluster(feats)
     feats = estimate_yield_bu_ac(feats)
@@ -80,7 +90,7 @@ def build_dataset(zonal_table="ndvi_zonal_stats_county_clipped",
     )
     gdf = gdf.merge(feats.reset_index().rename(columns={"index": "pin"}), on="pin")
 
-    popup_data = popup_curve_data(splines, pivot)
+    popup_data = popup_curve_data(splines, kept_series)
     gdf = gdf.merge(popup_data, left_on="pin", right_index=True)
     return gdf, best_k
 
@@ -102,29 +112,26 @@ def plot_static_map(gdf, out_path):
 
 # Identical to visualize_subset.py's popup JS -- same curve-data shape
 # (popup_curve_data, crop_clusters.py), same fields, same design (click,
-# not hover, to avoid the double-fire touch-device issue noted there).
+# not hover, to avoid the double-fire touch-device issue noted there; no
+# per-date dots, since UnivariateSpline smooths past noise rather than
+# passing through every point -- see popup_curve_data).
 SPARKLINE_JS = """
-function ndviSmoothSparklineSvg(denseValues, denseStartDoy, rawDoy, rawValues) {
+function ndviSmoothSparklineSvg(denseValues, denseStartDoy) {
     if (!denseValues || denseValues.length === 0) { return '<em>no data</em>'; }
     var w = 180, h = 50, pad = 4;
     var minDoy = denseStartDoy, maxDoy = denseStartDoy + denseValues.length - 1;
     var x = function(doy) { return pad + (doy - minDoy) * (w - 2 * pad) / (maxDoy - minDoy); };
     var y = function(v) { return h - pad - v * (h - 2 * pad); };
     var linePts = denseValues.map(function(v, i) { return x(minDoy + i) + ',' + y(v); }).join(' ');
-    var dots = rawDoy.map(function(d, i) {
-        return '<circle cx="' + x(d) + '" cy="' + y(rawValues[i]) + '" r="2.5" fill="#333"></circle>';
-    }).join('');
     return '<svg width="' + w + '" height="' + (h + 4) + '">' +
            '<polyline points="' + linePts + '" fill="none" stroke="#333" stroke-width="1.5"></polyline>' +
-           dots + '</svg>';
+           '</svg>';
 }
 function bindCountyCropPopups(map) {
     map.eachLayer(function(layer) {
         if (layer.feature && layer.feature.properties && 'ndvi_dense' in layer.feature.properties) {
             var props = layer.feature.properties;
             var dense = JSON.parse(props.ndvi_dense);
-            var rawDoy = JSON.parse(props.ndvi_raw_doy);
-            var rawValues = JSON.parse(props.ndvi_raw_values);
             var confPct = Math.round(props.confidence * 100);
             var confColor = confPct >= 75 ? '#2c7a3f' : (confPct >= 60 ? '#e67e22' : '#c0392b');
             var confWord = confPct >= 75 ? 'high' : (confPct >= 60 ? 'moderate' : 'low');
@@ -141,7 +148,8 @@ function bindCountyCropPopups(map) {
                         '<b>' + props.cluster_label + '</b><br>' +
                         '<span style="color:' + confColor + '">' + confPct + '% confidence (' + confWord + ')</span>' +
                         ' vs. next-closest group' + yieldHtml + '<br>' +
-                        ndviSmoothSparklineSvg(dense, props.ndvi_dense_start_doy, rawDoy, rawValues);
+                        ndviSmoothSparklineSvg(dense, props.ndvi_dense_start_doy) +
+                        '<div style="font-size:10px;color:#777">N = ' + props.n_dates + ' valid dates</div>';
             layer.bindPopup(html);
         }
     });

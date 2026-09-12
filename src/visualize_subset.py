@@ -35,15 +35,15 @@ REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 
 def build_dataset():
     df = load_series()
-    splines, doy, pivot = fit_splines(df)
-    feats = extract_features(splines, doy, pivot)
+    splines, kept_series = fit_splines(df)
+    feats = extract_features(splines, kept_series)
     feats, best_k = cluster(feats)
 
     cluster_means = feats.groupby("cluster").mean()
     label_by_id = {cid: label_cluster(row) for cid, row in cluster_means.iterrows()}
     feats["cluster_label"] = feats["cluster"].map(label_by_id)
 
-    integrals = seasonal_ndvi_integral(splines)
+    integrals = seasonal_ndvi_integral(splines, kept_series)
     feats["seasonal_ndvi_integral"] = feats.index.map(integrals)
     feats = rank_within_cluster(feats)
     feats = estimate_yield_bu_ac(feats)
@@ -60,43 +60,40 @@ def build_dataset():
     )
     gdf = gdf.merge(feats.reset_index().rename(columns={"index": "pin"}), on="pin")
 
-    # Dense curve (one value per day, from the PCHIP fit) for a genuinely
-    # smooth line, plus the actual raw measurements so the popup can still
-    # show what was measured vs. interpolated -- same distinction
-    # crop_clusters.png draws (thin line = fit, dots = observed).
-    popup_data = popup_curve_data(splines, pivot)
+    # Dense curve (one value per day, from the smoothing fit) for a
+    # genuinely smooth line -- see popup_curve_data for why individual raw
+    # points are no longer plotted alongside it.
+    popup_data = popup_curve_data(splines, kept_series)
     gdf = gdf.merge(popup_data, left_on="pin", right_index=True)
     return gdf
 
 
 # Draws the dense PCHIP-fitted curve (one point per day -- genuinely smooth,
-# not a straight line between 8 raw samples) with small dots marking the
-# actual measured dates, so it's clear what was observed vs. interpolated.
+# not a straight line between the raw samples). No per-date dots anymore --
+# see crop_clusters.popup_curve_data for why (UnivariateSpline smooths past
+# noise rather than passing through every point, so a dot at a noisy raw
+# date would visually contradict the curve it's meant to support). The
+# number of valid dates behind the curve is shown as plain text instead.
 # Bound only to click/tap (bindPopup), not also to hover (bindTooltip):
 # binding both was firing twice on a single tap on touch devices, since a
 # tap can synthesize both a hover and a click event.
 SPARKLINE_JS = """
-function ndviSmoothSparklineSvg(denseValues, denseStartDoy, rawDoy, rawValues) {
+function ndviSmoothSparklineSvg(denseValues, denseStartDoy) {
     if (!denseValues || denseValues.length === 0) { return '<em>no data</em>'; }
     var w = 180, h = 50, pad = 4;
     var minDoy = denseStartDoy, maxDoy = denseStartDoy + denseValues.length - 1;
     var x = function(doy) { return pad + (doy - minDoy) * (w - 2 * pad) / (maxDoy - minDoy); };
     var y = function(v) { return h - pad - v * (h - 2 * pad); };
     var linePts = denseValues.map(function(v, i) { return x(minDoy + i) + ',' + y(v); }).join(' ');
-    var dots = rawDoy.map(function(d, i) {
-        return '<circle cx="' + x(d) + '" cy="' + y(rawValues[i]) + '" r="2.5" fill="#333"></circle>';
-    }).join('');
     return '<svg width="' + w + '" height="' + (h + 4) + '">' +
            '<polyline points="' + linePts + '" fill="none" stroke="#333" stroke-width="1.5"></polyline>' +
-           dots + '</svg>';
+           '</svg>';
 }
 function bindSubsetPopups(map) {
     map.eachLayer(function(layer) {
         if (layer.feature && layer.feature.properties && 'ndvi_dense' in layer.feature.properties) {
             var props = layer.feature.properties;
             var dense = JSON.parse(props.ndvi_dense);
-            var rawDoy = JSON.parse(props.ndvi_raw_doy);
-            var rawValues = JSON.parse(props.ndvi_raw_values);
             var confPct = Math.round(props.confidence * 100);
             // Bounded [50, 100] by construction (see assignment_confidence
             // in crop_clusters.py) -- these cutoffs are just for readability,
@@ -122,7 +119,8 @@ function bindSubsetPopups(map) {
                         '<b>' + props.cluster_label + '</b><br>' +
                         '<span style="color:' + confColor + '">' + confPct + '% confidence (' + confWord + ')</span>' +
                         ' vs. next-closest group' + yieldHtml + '<br>' +
-                        ndviSmoothSparklineSvg(dense, props.ndvi_dense_start_doy, rawDoy, rawValues);
+                        ndviSmoothSparklineSvg(dense, props.ndvi_dense_start_doy) +
+                        '<div style="font-size:10px;color:#777">N = ' + props.n_dates + ' valid dates</div>';
             layer.bindPopup(html);
         }
     });

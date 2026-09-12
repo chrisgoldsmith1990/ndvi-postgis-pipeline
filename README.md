@@ -401,9 +401,92 @@ entirely at the smaller subset scale, leaving almost nothing for the
 second stage — the deterministic threshold is what actually generalizes
 across both scales.
 
-**Result:** 3,641 corn-like, 4,379 soybean-like, 1,545 non-row-crop, out
-of 9,565 clustered parcels (6 more excluded by the date-coverage
-thresholds above) — a near-even row-crop split consistent with the
-county's real acreage.
+**Result:** 3,128 corn-like, 4,734 soybean-like, 1,396 non-row-crop, out of
+9,258 clustered parcels — a near-even row-crop split consistent with the
+county's real acreage. (Updated after the outlier-rejection and urban-
+exclusion fixes below; see those for what changed the count from the
+figures reported when this section was first written.)
 
 ![McLean County crop-type clusters, full county](reports/county_crop_map.png)
+
+### Cleaning up the interactive map: outliers, urban parcels, and curve smoothing
+
+Once the interactive version of this map was live (matching
+visualize_subset.py's per-parcel popup, at full county scale), three
+things stood out that the static PNG hadn't made visible: sharp,
+single-date spikes/troughs in some popup curves, real farmland-only
+clustering being computed over parcels that are obviously not
+farmland (inside Bloomington/Normal), and a general request for a
+smoother-looking popup curve.
+
+**Per-parcel outlier rejection.** Some popup curves showed a sharp jump up
+or down on a single date that immediately reverted on the next — a
+residual cloud-shadow or haze pixel that survived the per-pixel SCL/Fmask
+mask on just that date, for just that one parcel. This is a different
+problem from `BAD_DATES` (crop_clusters.py): that was one whole-scene bad
+Sentinel-2 pass affecting every subset parcel on the same date, found and
+excluded by hand. A per-parcel artifact like this can't be hand-curated
+one date at a time at county scale, so `crop_clusters._reject_outliers`
+now checks each parcel's own series for points that don't fit a straight
+line drawn between their immediate (real, irregularly-spaced) neighbors,
+and drops the ones that don't. A first version used a Hampel-filter-style
+test instead (comparing each point to a small window of *rank-order*
+neighbors) — checked against the actual effect on cluster sizes rather
+than assumed safe, and it wasn't: it rejected ~16% of all points and
+collapsed the subset's corn-like cluster from 45 parcels down to 23,
+because comparing a point to nearby rank-order neighbors doesn't account
+for how far apart they actually are in time, and corn's genuine signal —
+a fast, sustained green-up — looks exactly like an "outlier" relative to
+a small index-window after a real gap in the data. The local-straight-line
+version doesn't have that problem (a real, fast, sustained change still
+lands close to a line through its actual time-adjacent neighbors) and
+rejects a much more plausible ~1-6% of points depending on scale.
+
+**Two different curves, on purpose.** A genuine smoothing fit
+(`scipy.interpolate.UnivariateSpline`, `s > 0`) was tried next, to make
+the popup line itself look smoother rather than just removing outliers —
+and even a small smoothing budget turned out to erode the sharp, narrow
+peak that identifies a corn-like curve: on the subset, adding smoothing on
+top of outlier rejection alone collapsed corn-like from 63 parcels down to
+18, because a smoothing spline's squared-residual budget is cheaper to
+spend flattening a real narrow peak than tracking noise among the many
+flatter points around it — exactly backwards for a method whose entire
+signal *is* peak shape. The fix: two separate fits from the same
+outlier-cleaned points. `crop_clusters.fit_splines` still uses PCHIP
+(exact interpolation) for the *analysis* curve that `extract_features`
+reads peak timing/height and green-up/decline rates off of;
+`popup_curve_data` fits its own separate, real smoothing spline purely for
+the *display* line in the map popup, where softening a peak's exact shape
+is a cosmetic cost, not a correctness one. Individual raw-date dots are no
+longer drawn on that display curve either — with a genuine smoothing fit,
+a dot at each raw date would show the real (slightly noisy) measurement
+sitting visibly off the smoothed line, which reads as the fit being wrong
+rather than as the point being the ordinary noise it's smoothing past. The
+popup now shows the count of valid dates (`N = ...`) as plain text instead.
+
+**Excluding Bloomington/Normal.** The >10-acre parcel filter and
+NDVI-based clustering have no notion of land use or zoning, so a handful
+of parcels inside the two incorporated cities (parks, cemeteries,
+industrial/commercial tracts) were passing every geometric/spectral test a
+real field would and showing up colored on the map — the same
+non-agricultural-parcel limitation already called out for the anomaly map
+at the top of this README, now visibly a problem for the crop-type map
+too. `src/exclude_urban.py` fetches Bloomington and Normal's real
+municipal boundary polygons from OpenStreetMap via Nominatim's
+`polygon_geojson` search (reassembling an administrative-boundary relation
+from raw Overpass output by hand is a known headache; Nominatim already
+does that assembly and hands back a clean polygon for a named place), and
+excludes any parcel whose *centroid* falls inside either boundary — not
+`ST_Intersects`, which would also exclude legitimate rural parcels merely
+sharing a boundary edge with the city limit — from the clustering input
+entirely, not just hidden from the rendered map afterward. 307 of 9,571
+county parcels were inside Bloomington/Normal and are excluded this way.
+
+**Not yet done:** county-wide NASA HLS (Landsat) densification.
+`src/fetch_hls.py` supports a `county` mode (built and used to densify the
+subset's Sentinel-2 series from 10 to 18 dates), but it hasn't been run at
+county scale — the county-wide curves above are Sentinel-2 only (43
+dates). Denser per-parcel coverage would likely reduce reliance on the
+outlier filter above rather than replace the need for it, since the
+underlying artifact (a residual cloud/shadow pixel slipping past masking
+on one date) isn't sensor-specific.
