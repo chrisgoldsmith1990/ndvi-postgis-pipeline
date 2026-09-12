@@ -331,11 +331,17 @@ yield ranking — against all **9,571** county parcels (fetch scope: all
 four Sentinel-2/HLS MGRS tiles covering the county, not one) surfaced
 three real bugs that the subset was too small and too uniform to expose.
 
-**Static, not interactive, at this scale** — `src/visualize_county_crops.py`
-renders a plain matplotlib choropleth rather than `visualize_subset.py`'s
-per-parcel hover map: embedding a full NDVI curve in every popup works
-fine at 163 parcels (a 6–9MB page) but would balloon to several hundred MB
-at 9,571, the same trade-off `visualize.py`'s anomaly map already made.
+**[Interactive map](https://chrisgoldsmith1990.github.io/ndvi-postgis-pipeline/reports/county_crop_map.html)** —
+same per-parcel click popup as the subset map (NDVI curve, cluster label,
+assignment confidence, yield estimate), scaled to all 9,571 county
+parcels. An earlier version of this section assumed that would balloon to
+several hundred MB and shipped a static PNG instead; measured directly,
+it's ~34MB — large, but this codebase already had its own precedent that
+size range works fine (`visualize.py`'s county-wide anomaly map embeds a
+full per-parcel NDVI series for the same ~9,571 parcels at ~7MB), so the
+estimate was revised rather than trusted unchecked.
+`src/visualize_county_crops.py` still also renders the plain static
+choropleth below, as a lightweight fallback for the README itself.
 
 **Bug 1 — whole-AOI cloud rejection discarded far more than it should have.**
 `fetch_timeseries.py`'s per-date cloud check averaged bad-pixel fraction

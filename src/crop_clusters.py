@@ -77,6 +77,7 @@ Features:
   slope rather than a fabricated decline).
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -337,6 +338,28 @@ def cluster(feats, k_range=range(2, 6), min_cluster_frac=0.05,
 
     result = pd.concat([non_row_crop, stage2])
     return result.loc[feats.index], best_k
+
+
+def popup_curve_data(splines, pivot):
+    """Per-parcel dense curve + raw observed points, as GeoJSON-ready JSON
+    strings -- shared by visualize_subset.py and visualize_county_crops.py's
+    interactive maps. Built per pin over that pin's own observed range
+    (cs.x) rather than one shared range for every parcel: since fit_splines
+    now fits each parcel on its own valid dates (parcels no longer all
+    share one global date set -- see its docstring), a shared range would
+    show fabricated values on dates a given parcel never actually cleared."""
+    rows = {}
+    for pin, cs in splines.items():
+        dense_doy = np.arange(int(cs.x.min()), int(cs.x.max()) + 1)
+        own_dates = pivot.loc[pin].dropna().sort_index().index
+        rows[pin] = {
+            "ndvi_dense_start_doy": int(dense_doy[0]),
+            "ndvi_dense": json.dumps([round(v, 3) for v in cs(dense_doy)]),
+            "ndvi_raw_doy": json.dumps([int(d) for d in cs.x]),
+            "ndvi_raw_dates": json.dumps([d.strftime("%Y-%m-%d") for d in own_dates]),
+            "ndvi_raw_values": json.dumps([round(v, 3) for v in cs(cs.x)]),
+        }
+    return pd.DataFrame.from_dict(rows, orient="index")
 
 
 def assignment_confidence(X, model):

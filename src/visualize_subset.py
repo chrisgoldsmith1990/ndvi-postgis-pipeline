@@ -14,16 +14,13 @@ rather than hardcoded by ID. These are still behavioral labels, not
 validated crop identifications -- no ground truth exists for this subset.
 """
 
-import json
 from pathlib import Path
 
 import folium
 import geopandas as gpd
-import numpy as np
-import pandas as pd
 from sqlalchemy import text
 
-from src.crop_clusters import cluster, extract_features, fit_splines, label_cluster, load_series
+from src.crop_clusters import cluster, extract_features, fit_splines, label_cluster, load_series, popup_curve_data
 from src.db import get_engine
 from src.yield_ranking import (
     estimate_total_bushels,
@@ -34,27 +31,6 @@ from src.yield_ranking import (
 )
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
-
-
-def _popup_curve_data(splines, pivot):
-    """Per-parcel dense curve + raw observed points, as GeoJSON-ready JSON
-    strings. Built per pin over that pin's own observed range (cs.x) rather
-    than one shared range for every parcel: since fit_splines now fits each
-    parcel on its own valid dates (parcels no longer all share one global
-    date set -- see its docstring), a shared range would show fabricated
-    values on dates a given parcel never actually cleared."""
-    rows = {}
-    for pin, cs in splines.items():
-        dense_doy = np.arange(int(cs.x.min()), int(cs.x.max()) + 1)
-        own_dates = pivot.loc[pin].dropna().sort_index().index
-        rows[pin] = {
-            "ndvi_dense_start_doy": int(dense_doy[0]),
-            "ndvi_dense": json.dumps([round(v, 3) for v in cs(dense_doy)]),
-            "ndvi_raw_doy": json.dumps([int(d) for d in cs.x]),
-            "ndvi_raw_dates": json.dumps([d.strftime("%Y-%m-%d") for d in own_dates]),
-            "ndvi_raw_values": json.dumps([round(v, 3) for v in cs(cs.x)]),
-        }
-    return pd.DataFrame.from_dict(rows, orient="index")
 
 
 def build_dataset():
@@ -88,7 +64,7 @@ def build_dataset():
     # smooth line, plus the actual raw measurements so the popup can still
     # show what was measured vs. interpolated -- same distinction
     # crop_clusters.png draws (thin line = fit, dots = observed).
-    popup_data = _popup_curve_data(splines, pivot)
+    popup_data = popup_curve_data(splines, pivot)
     gdf = gdf.merge(popup_data, left_on="pin", right_index=True)
     return gdf
 
