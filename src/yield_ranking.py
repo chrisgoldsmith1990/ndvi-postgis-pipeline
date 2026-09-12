@@ -92,8 +92,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.crop_clusters import cluster, extract_features, fit_splines, load_series
-from src.visualize_subset import label_cluster
+from src.crop_clusters import cluster, extract_features, fit_splines, label_cluster, load_series
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 

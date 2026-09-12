@@ -23,20 +23,11 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
-from src.crop_clusters import cluster, extract_features, fit_splines, load_series
+from src.crop_clusters import cluster, extract_features, fit_splines, label_cluster, load_series
 from src.db import get_engine
+from src.yield_ranking import estimate_yield_bu_ac, rank_within_cluster, seasonal_ndvi_integral
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
-
-
-def label_cluster(row):
-    """Behavioral label from a cluster's own feature means -- not a fixed
-    ID mapping, since KMeans cluster numbering is arbitrary per run."""
-    if row["early_ndvi"] > 0.3:
-        return "Non-row-crop (already green in April)"
-    if row["peak_doy"] < 210:
-        return "Corn-like (early peak, fast decline)"
-    return "Soybean-like (later peak, slower decline)"
 
 
 def build_dataset():
@@ -48,6 +39,11 @@ def build_dataset():
     cluster_means = feats.groupby("cluster").mean()
     label_by_id = {cid: label_cluster(row) for cid, row in cluster_means.iterrows()}
     feats["cluster_label"] = feats["cluster"].map(label_by_id)
+
+    integrals = seasonal_ndvi_integral(splines, doy)
+    feats["seasonal_ndvi_integral"] = feats.index.map(integrals)
+    feats = rank_within_cluster(feats)
+    feats = estimate_yield_bu_ac(feats)
 
     engine = get_engine()
     pins = feats.index.tolist()
@@ -104,10 +100,21 @@ function bindSubsetPopups(map) {
             // not a claim about statistical significance.
             var confColor = confPct >= 75 ? '#2c7a3f' : (confPct >= 60 ? '#e67e22' : '#c0392b');
             var confWord = confPct >= 75 ? 'high' : (confPct >= 60 ? 'moderate' : 'low');
+
+            // estimated_yield_bu_ac is null for the non-row-crop cluster (no
+            // corresponding crop-yield literature/anchor applies -- see
+            // yield_ranking.py; pandas NaN serializes to GeoJSON as null).
+            var yieldHtml = '';
+            if (props.estimated_yield_bu_ac !== null) {
+                yieldHtml = '<br>Est. yield: <b>' + props.estimated_yield_bu_ac.toFixed(0) + ' bu/ac</b>' +
+                            ' (' + Math.round(props.percentile_in_cluster) + 'th percentile in cluster)' +
+                            '<br><span style="font-size:10px;color:#777">approximate -- see README</span>';
+            }
+
             var html = '<b>Parcel ' + props.pin + '</b><br>' +
                         '<b>' + props.cluster_label + '</b><br>' +
                         '<span style="color:' + confColor + '">' + confPct + '% confidence (' + confWord + ')</span>' +
-                        ' vs. next-closest group<br>' +
+                        ' vs. next-closest group' + yieldHtml + '<br>' +
                         ndviSmoothSparklineSvg(dense, props.ndvi_dense_start_doy, rawDoy, rawValues);
             layer.bindPopup(html);
         }

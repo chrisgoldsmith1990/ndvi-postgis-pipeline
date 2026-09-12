@@ -140,6 +140,16 @@ def extract_features(splines, doy, pivot, oversample_days=1):
     return pd.DataFrame.from_dict(rows, orient="index")
 
 
+def label_cluster(row):
+    """Behavioral label from a cluster's own feature means -- not a fixed
+    ID mapping, since KMeans cluster numbering is arbitrary per run."""
+    if row["early_ndvi"] > 0.3:
+        return "Non-row-crop (already green in April)"
+    if row["peak_doy"] < 210:
+        return "Corn-like (early peak, fast decline)"
+    return "Soybean-like (later peak, slower decline)"
+
+
 def cluster(feats, k_range=range(2, 6), min_cluster_frac=0.05):
     X = StandardScaler().fit_transform(feats.values)
 
