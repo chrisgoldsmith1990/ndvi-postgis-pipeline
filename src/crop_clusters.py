@@ -12,15 +12,32 @@ separate, later decision (e.g. cross-referencing CDL, itself lagged a
 full year -- see README).
 
 Only 8 dates survived cloud/shadow filtering out of 41 candidate Sentinel-2
-passes this season (confirmed by re-running the search with no whole-tile
-cloud pre-filter at all -- the other 33 are genuinely too cloudy over this
-specific AOI, not an artifact of an overly strict filter). That's a real,
-irregularly-spaced 8 points per parcel (a 45-day gap between May 9 and
-June 23 is the worst of it, then two closely-spaced points right at the
-end -- Sept 1 and Sept 3), which makes naive two-point differences a poor
-way to estimate a "rate", so each parcel's series is fit with a smooth
-curve instead and features are read off that curve: interpolated peak
-timing/height, and the curve's own derivative for green-up/decline rates.
+passes this season at the strict (20% bad-pixel) threshold -- confirmed by
+re-running the search with no whole-tile cloud pre-filter at all, the other
+33 are genuinely too cloudy over this specific AOI, not an artifact of an
+overly strict filter. The worst gap: 45 days between May 9 and June 23,
+covering almost the entire green-up transition with zero observations --
+which matters, because peak-timing and green-up-rate alone can't
+distinguish "fast burst early, then plateau" from "steady climb the whole
+way" if there's no data inside the window where that difference would show.
+
+Loosening the threshold to 35% recovered two dates inside that exact gap
+(May 14, June 15) plus a bonus (July 28) -- but July 28 turned out to be a
+bad date, not just a noisier one: county-mean NDVI dropped to 0.43 on that
+date alone, sandwiched between 0.83 (July 18) and 0.89 (Aug 22), and every
+sampled parcel showed the same implausible crash-and-recover pattern
+(stdev 0.26 vs ~0.03-0.08 on its neighbors). That's whole-scene residual
+haze/thin cirrus the binary SCL mask didn't catch, not real phenology --
+excluded explicitly below rather than let it corrupt every curve fit with
+a spurious dip. May 14 and June 15 both integrate smoothly into their
+neighbors' trajectories and are kept.
+
+10 dates total, still irregularly spaced (two closely-spaced points right
+at the end -- Sept 1 and Sept 3), which makes naive two-point differences
+a poor way to estimate a "rate", so each parcel's series is fit with a
+smooth curve instead and features are read off that curve: interpolated
+peak timing/height, and the curve's own derivative for green-up/decline
+rates.
 
 A plain natural cubic spline (scipy.interpolate.CubicSpline) was the first
 attempt, and it visibly overshoots on this data -- some parcels' fitted
@@ -56,19 +73,30 @@ from scipy.interpolate import PchipInterpolator
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from src.db import get_engine
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 
 
+# 2026-07-28 passed the per-AOI SCL cloud/shadow check (74% clear) but is a
+# bad date, not just a noisy one: county-mean NDVI dropped to 0.43 that day
+# alone, between 0.83 (Jul 18) and 0.89 (Aug 22), with every sampled parcel
+# showing the same implausible crash-and-recover shape (stdev 0.26 vs
+# ~0.03-0.08 on neighboring dates) -- whole-scene residual haze the binary
+# SCL mask didn't catch. Excluded explicitly rather than let it corrupt
+# every curve fit with a spurious dip.
+BAD_DATES = {"2026-07-28"}
+
+
 def load_series():
     engine = get_engine()
-    df = pd.read_sql(text("""
-        SELECT pin, date, ndvi_mean FROM ndvi_zonal_stats_subset
-        WHERE ndvi_mean IS NOT NULL ORDER BY pin, date
-    """), engine)
+    query = text(
+        "SELECT pin, date, ndvi_mean FROM ndvi_zonal_stats_subset "
+        "WHERE ndvi_mean IS NOT NULL AND date NOT IN :bad_dates ORDER BY pin, date"
+    ).bindparams(bindparam("bad_dates", expanding=True))
+    df = pd.read_sql(query, engine, params={"bad_dates": list(BAD_DATES)})
     df["date"] = pd.to_datetime(df["date"])
     return df
 
@@ -214,7 +242,7 @@ def plot_clusters(splines, doy, feats, out_path):
 if __name__ == "__main__":
     df = load_series()
     splines, doy, pivot = fit_splines(df)
-    print(f"{len(splines)} parcels with complete 8-date series, spline-fit over day-of-year {list(doy)}", flush=True)
+    print(f"{len(splines)} parcels with complete {len(doy)}-date series, spline-fit over day-of-year {list(doy)}", flush=True)
 
     plot_spline_sample(splines, doy, pivot, REPORTS_DIR / "subset_spline_fit.png")
 

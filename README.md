@@ -94,6 +94,7 @@ it's the query planner's job and a five-line query.
 | 6 | Time series + anomaly flag | [`src/anomaly.py`](src/anomaly.py) |
 | 7 | This README | — |
 | — | County map (static + interactive), the payoff of 4-6 | [`src/visualize.py`](src/visualize.py) |
+| — | Crop-type curve-shape clustering (subset area) | [`src/fetch_timeseries.py`](src/fetch_timeseries.py), [`src/crop_clusters.py`](src/crop_clusters.py), [`src/visualize_subset.py`](src/visualize_subset.py) — see [below](#crop-type-exploration-subset-area) |
 
 ## Study area
 
@@ -202,3 +203,39 @@ seemed more useful to fix properly and document than to route around:
 Separately, the real county parcel data included 5 self-intersecting
 geometries out of 9,578 — `ST_MakeValid` runs automatically after load so
 `ST_Intersects`/KNN don't choke on them downstream.
+
+## Crop-type exploration (subset area)
+
+A follow-on question from the anomaly work: can NDVI curve *shape* — not
+just level — distinguish what's actually growing in a field? Corn and
+soybean have different phenology (corn greens up faster and peaks earlier;
+soybean climbs more gradually and peaks later), which is the same signal
+USDA's own Cropland Data Layer is built on. Scoped to a small rural subset
+(125–163 parcels, depending on date coverage) rather than the full county,
+since this needs every available date across the season, not monthly
+composites — [`src/fetch_timeseries.py`](src/fetch_timeseries.py),
+[`src/crop_clusters.py`](src/crop_clusters.py),
+[`src/visualize_subset.py`](src/visualize_subset.py).
+
+**[Interactive map](https://chrisgoldsmith1990.github.io/ndvi-postgis-pipeline/reports/subset_crop_map.html)** —
+tap any parcel for its NDVI curve, behavioral cluster, and an assignment
+confidence.
+
+Only 8 of 41 candidate Sentinel-2 passes were clear enough to use at first,
+leaving a 45-day blind gap (May 9 → June 23) across almost the entire
+green-up transition — enough to say *when* a field peaked, but not whether
+it got there in a burst or a steady climb. Loosening the cloud threshold
+recovered two dates inside that gap (and caught one bad one: a scene that
+passed the pixel-level cloud check but showed whole-scene residual haze —
+excluded explicitly, see `crop_clusters.BAD_DATES`). With real data inside
+the gap, the shape difference is stark and quantitative: from an
+almost-identical starting point in mid-May, the corn-like cluster reaches
+97% of its season peak by June 23, while the soybean-like cluster has only
+reached 67% of its (higher) peak by the same date and keeps climbing for
+another two months. Clusters are unsupervised and reported as behavioral
+groups, not validated crop labels — no ground truth exists for this
+subset. (USDA's CDL would be the obvious cross-check, but it lags a full
+year behind the crop it describes — the newest available CDL right now is
+for last year, not this year — and corn/soybean rotation means a
+year-old label can be wrong for the current season on any given field.
+That's a real constraint on validating this, not an oversight.)

@@ -52,7 +52,13 @@ SUBSET_BBOX = (-88.65, 40.65, -88.55, 40.72)
 # water, unclassified, snow) is intentionally permissive -- the point is
 # excluding cloud/shadow contamination, not pre-judging land cover.
 SCL_BAD_VALUES = {0, 1, 3, 8, 9, 10}
-MAX_BAD_FRACTION = 0.2  # discard a date if >20% of the AOI is cloud/shadow/nodata
+# Loosened from 0.2 to 0.35: the entire green-up transition for most parcels
+# falls in the 45-day gap between the two nearest clean dates either side of
+# it (May 9 -> June 23), and the two next-best candidates inside that gap
+# (May 14 at 34% bad, June 15 at 28% bad) sit just above the stricter cutoff
+# -- worth the extra pixel noise on those two dates to get any signal at all
+# inside the window that actually determines ramp shape.
+MAX_BAD_FRACTION = 0.35
 
 RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
 
