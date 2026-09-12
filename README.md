@@ -401,11 +401,15 @@ entirely at the smaller subset scale, leaving almost nothing for the
 second stage — the deterministic threshold is what actually generalizes
 across both scales.
 
-**Result:** 3,128 corn-like, 4,734 soybean-like, 1,396 non-row-crop, out of
-9,258 clustered parcels — a near-even row-crop split consistent with the
-county's real acreage. (Updated after the outlier-rejection and urban-
-exclusion fixes below; see those for what changed the count from the
-figures reported when this section was first written.)
+**Result:** 2,500 corn-like, 5,386 soybean-like, 1,372 non-row-crop, out of
+9,258 clustered parcels. (This is the CDL-validated EVI2 + percentile
+classifier's split, documented further down — see "Validating against
+real ground truth" below. It superseded an earlier NDVI-based figure of
+3,128/4,734/1,396 reported when this section was first written; the
+county's real corn/soybean acreage is close to even, but the validated
+classifier's own split need not exactly match acreage, since it's
+optimized for per-parcel accuracy against real labels, not for matching
+the county-wide total.)
 
 ![McLean County crop-type clusters, full county](reports/county_crop_map.png)
 
@@ -490,3 +494,147 @@ dates). Denser per-parcel coverage would likely reduce reliance on the
 outlier filter above rather than replace the need for it, since the
 underlying artifact (a residual cloud/shadow pixel slipping past masking
 on one date) isn't sensor-specific.
+
+### Validating against real ground truth: USDA's Cropland Data Layer
+
+Every result up to this point was validated only by proxy: cluster
+silhouette, KMeans assignment confidence, whether the corn/soybean split
+matched the county's real *acreage* — never checked against actual known
+crop labels for actual fields. USDA's Cropland Data Layer (CDL) is exactly
+that: a real, per-pixel (30m) classified crop-type product covering the
+whole country. `src/validate_against_cdl.py` uses it to properly validate
+(and tune) the classification, and to finally settle the NDVI-vs-EVI2
+question this project explored earlier with real accuracy numbers instead
+of just proxy metrics.
+
+**Why not just compare this season's map against the newest CDL?** CDL
+for a season isn't published until after harvest, so the most recent one
+available describes a *past* year — and Illinois corn/soybean farming is
+dominated by annual rotation. A field that was corn last year is *expected*
+to be soybean this year, not corn again, so a same-label match against
+last year's CDL would mostly measure rotation, not classification
+accuracy — a low match rate could mean the classifier is *right*, not
+wrong. The fix: validate a past season's classification against that
+*same* season's CDL — same year, same imagery, real ground truth, no
+rotation ambiguity.
+
+**Why day-of-year-capped.** The validation season's imagery is fetched
+only up to the same day-of-year (246, Sept 3) the current 2026 season's
+data actually reaches, so the validation never uses late-season
+information the live pipeline wouldn't actually have partway through a
+real season — otherwise it would be an unrealistically easy test.
+
+**Why 2021.** Checked three free sources directly rather than assuming:
+Planetary Computer's `usda-cdl` mirror's own declared metadata caps its
+temporal extent at 2021-12-31 (not a query problem — genuinely not
+mirrored past that year); USDA/GMU's own CropScape REST API
+(nassgeodata.gmu.edu) has an expired SSL certificate as of this writing;
+and USDA's direct-download portal returns a real `403 Forbidden` to
+scripted requests. The only path to more recent years is Google Earth
+Engine's CDL mirror, which needs a Google Cloud account/credentials this
+project doesn't have. 2021 is what's actually available for free without
+new credentials — and it's enough: corn/soybean growth *physics* don't
+change year to year, only which specific field grows which crop (driven
+by rotation), so a method validated on 2021 should generalize.
+
+**Result.** Fetched 2021 Sentinel-2 + HLS for the subset area (16 dates,
+capped at DOY 246) and CDL 2021 (67 Corn, 94 Soybean, 2 Other, via a
+per-parcel majority-vote zonal join — the categorical equivalent of
+`zonal_stats.py`'s mean-based reduction). Swept the `peak_doy`
+classification threshold against those 161 CDL-labeled Corn/Soybean
+parcels, 5-fold cross-validated so the reported accuracy isn't inflated by
+picking the best of many thresholds against the same data being scored:
+
+| | NDVI | EVI2 |
+|---|---|---|
+| Best threshold (every fold agreed) | 186 | 186 |
+| Cross-validated accuracy | 80.1% ± 7.3% | **87.6% ± 5.1%** |
+| Accuracy at the old hardcoded threshold (210) | 75.8% | 77.0% |
+
+Both indices land on the *same* optimal threshold (186, not the
+previously hardcoded 210, picked without any validation) — a genuine
+phenological signal, not an artifact of one index's scale. EVI2 wins on
+accuracy at that threshold regardless, consistent with the earlier
+proxy-metric comparison (better silhouette, better KMeans confidence,
+fewer detected per-parcel outliers) but now backed by real labels instead
+of just those proxies. A 5-feature logistic regression (adding
+`early_ndvi`, `peak_ndvi`, `green_up_rate`, `decline_rate` alongside
+`peak_doy`) *underperformed* the single-threshold rule for both indices —
+validation that this project's existing simple-rule architecture is the
+right amount of complexity, not an oversimplification.
+
+**A cross-validated threshold still failed to transfer — found by actually
+deploying it.** Applying the validated absolute cutoff (186) unchanged to
+the 2026 season identified only 2 of 150 row-crop parcels as corn-like,
+against an expected 40-60. Root cause: `peak_doy` isn't a clean biological
+measurement independent of when the satellite happened to have a clear
+pass — it's frequently the exact date of whichever observation caught a
+parcel's true peak, and that date shifts with each season's own cloud
+pattern. Confirmed directly: 2021's row-crop `peak_doy` values cluster at
+day 185 — July 4, 2021, an actual fetched date — while 2026's cluster at
+day 195 — July 14, 2026, also an actual fetched date. A day-of-year
+threshold tuned on one season's specific observation calendar doesn't
+generalize to a different season's different one, no matter how carefully
+it was cross-validated *within* that season.
+
+**Fix: a percentile, not a day.** Threshold 186 corresponded to the 31.7th
+percentile of 2021's own row-crop `peak_doy` distribution (not the CDL
+ground truth's true ~42% corn share — an accuracy-maximizing threshold
+needn't preserve the marginal class split). Using that *percentile*
+against each season's own distribution, rather than the fixed day,
+requires only that corn's peak-timing *rank* relative to soybean is
+stable year to year — a weaker, more defensible assumption than "corn
+peaks on the same calendar day every year," and one consistent with
+corn's real agronomic earlier-peak relationship to soybean. Within one
+season's own random cross-validation folds the percentile version scores
+lower than the absolute-day version (75.1% vs. 87.6% for EVI2) —
+expected, since a random split of one season has no calendar shift to
+correct for, so the fixed day has a home-field advantage there that
+doesn't exist across a real season change. The relevant test is the
+cross-*season* one, where the absolute version failed outright.
+
+**A second tie-handling problem, found the same way — by actually
+deploying it at county scale.** The first county-wide run of the
+percentile version produced only 20.7% corn against a 31.7% target.
+Cause: `peak_doy`'s quantization (above) means large blocks of parcels can
+share the *exact same* value — one run found 1,957 of ~7,900 county
+row-crop parcels sharing a single peak_doy, a block spanning ~24% of the
+population by itself, bigger than the gap between the two splits actually
+achievable around it (~21% excluding the block entirely, ~45% including
+it whole). `numpy.percentile` interpolates a boundary value and a strict
+`<` comparison then dumps an entire tied block onto one side regardless of
+size; no tie-handling rule based on peak_doy *alone* can land near a
+target percentile that happens to fall inside a block that large. Fixed
+by sorting ties within a shared peak_doy value by `green_up_rate`
+(descending) as a secondary key: corn's validated signal is a faster
+green-up, not merely an earlier peak (mean `green_up_rate` 0.026 for CDL
+2021's real corn vs. 0.021 for soybean), so this extends an
+already-validated population-level relationship to break ties, rather
+than an arbitrary rule — though its power specifically at the exact
+boundary value couldn't be directly confirmed against CDL, since too few
+ground-truth parcels fell in that narrow window. This lands the split
+within rounding of the target every time (32.0% on the subset, 31.7% on
+the county, against a 31.7% target) rather than being at the mercy of
+wherever the largest tied block happens to sit.
+
+**Adopted:** `crop_clusters.py` now defaults to EVI2
+(`evi2_zonal_stats_*` tables) with `CORN_SOYBEAN_PEAK_DOY_PERCENTILE =
+31.7`, applied to each run's own row-crop `peak_doy` distribution (ties
+broken by `green_up_rate`), for the crop-type pipeline specifically.
+`visualize.py`'s separate anomaly-detection map is unaffected — this
+finding is about distinguishing corn from soybean by curve shape, not
+about field-health monitoring, and NDVI remains the right, more
+field-tested choice there. The corn/soybean split no longer uses KMeans
+at all (an earlier version did, then named the resulting cluster means)
+— it's two deterministic threshold rules now, matching exactly what was
+actually validated rather than approximating it through an unsupervised
+intermediate step whose cluster boundaries weren't guaranteed to land on
+the validated cutoff. The non-row-crop threshold (`NON_ROW_CROP_EARLY_NDVI`,
+now 0.19 for EVI2's scale) stays an absolute value, not a percentile: it
+measures an EVI2 *level* (how green a parcel is in early spring), not a calendar day, so
+it isn't exposed to the same observation-date-sensitivity problem — but
+it's also calibrated by percentile-matching to the old NDVI threshold's
+split size rather than independently cross-validated the same way, since
+CDL 2021 only had 2 true "Other" parcels in this subset, too few to
+validate a threshold against (though both of those 2 parcels' values do
+fall on the correct side of 0.19, weak corroboration rather than proof).

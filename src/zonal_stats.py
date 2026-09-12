@@ -31,7 +31,13 @@ from src.db import get_engine
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
-def compute_zonal_stats(ndvi_path, parcels_table="parcels"):
+def compute_zonal_stats(ndvi_path, parcels_table="parcels", prefix="ndvi"):
+    """prefix names the output columns (prefix_mean, prefix_min, ...) --
+    defaults to "ndvi" for the original NDVI-based anomaly pipeline, but
+    this function works on any single-band continuous raster (e.g. EVI2's
+    compute_evi2.py output too), so a caller producing a different index
+    should pass a matching prefix rather than get columns misleadingly
+    named "ndvi_mean" for values that aren't NDVI."""
     engine = get_engine()
     parcels = gpd.read_postgis(f"SELECT pin, geometry FROM {parcels_table}", engine, geom_col="geometry")
 
@@ -55,7 +61,7 @@ def compute_zonal_stats(ndvi_path, parcels_table="parcels"):
         nodata=float("nan"),
         geojson_out=False,
     )
-    result = pd.DataFrame(stats).add_prefix("ndvi_")
+    result = pd.DataFrame(stats).add_prefix(f"{prefix}_")
     result["pin"] = parcels["pin"].values
 
     if len(empty_pins):

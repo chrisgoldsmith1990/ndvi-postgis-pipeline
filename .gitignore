@@ -12,7 +12,9 @@ env/
 # Data — satellite imagery and derived rasters are large and shouldn't be committed
 data/raw/*
 data/processed/*
+data/processed_evi2/*
 data/hls_cache/*
+data/cdl_cache/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 

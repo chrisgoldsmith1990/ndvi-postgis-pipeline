@@ -34,9 +34,11 @@ def run(parcels_table="parcels_clipped", zonal_table=SUBSET_TABLE, recompute_ndv
     processed_dir = processed_dir or (DATA_DIR / "processed")
 
     # raw_dir also holds the old monthly composites ("2026-06", 7 chars)
-    # from fetch_imagery.py -- only process the full-date ("2026-04-09",
-    # 10 chars) directories here.
-    raw_dirs = sorted(d for d in raw_dir.iterdir() if len(d.name) == 10)
+    # from fetch_imagery.py, and (subset raw_dir only) the 2021
+    # CDL-validation season's dates (validate_against_cdl.py) -- also
+    # 10-char date strings, so length alone isn't enough anymore. Only
+    # process this (2026) season's full-date directories here.
+    raw_dirs = sorted(d for d in raw_dir.iterdir() if len(d.name) == 10 and d.name.startswith("2026-"))
     for scene_dir in raw_dirs:
         date = scene_dir.name
         red, nir = scene_dir / "red.tif", scene_dir / "nir.tif"

@@ -30,10 +30,10 @@ import matplotlib.pyplot as plt
 from sqlalchemy import text
 
 from src.crop_clusters import (
+    CLUSTER_LABELS,
     cluster,
     extract_features,
     fit_splines,
-    label_cluster,
     load_series,
     popup_curve_data,
 )
@@ -56,9 +56,9 @@ CLUSTER_COLORS = {
 }
 
 
-def build_dataset(zonal_table="ndvi_zonal_stats_county_clipped",
+def build_dataset(zonal_table="evi2_zonal_stats_county_clipped", value_column="evi2_mean",
                    parcels_table="parcels_clipped_county", bad_dates=frozenset(), exclude_urban=True):
-    df = load_series(table_name=zonal_table, bad_dates=bad_dates)
+    df = load_series(table_name=zonal_table, bad_dates=bad_dates, value_column=value_column)
     if exclude_urban:
         # Bloomington/Normal parcels excluded before clustering, not just
         # hidden on the map afterward -- see exclude_urban.py. Requires
@@ -70,11 +70,9 @@ def build_dataset(zonal_table="ndvi_zonal_stats_county_clipped",
               f"(inside Bloomington/Normal city limits)", flush=True)
     splines, kept_series = fit_splines(df)
     feats = extract_features(splines, kept_series)
-    feats, best_k = cluster(feats)
+    feats = cluster(feats)
 
-    cluster_means = feats.groupby("cluster").mean()
-    label_by_id = {cid: label_cluster(row) for cid, row in cluster_means.iterrows()}
-    feats["cluster_label"] = feats["cluster"].map(label_by_id)
+    feats["cluster_label"] = feats["cluster"].map(CLUSTER_LABELS)
 
     integrals = seasonal_ndvi_integral(splines, kept_series)
     feats["seasonal_ndvi_integral"] = feats.index.map(integrals)
@@ -92,7 +90,7 @@ def build_dataset(zonal_table="ndvi_zonal_stats_county_clipped",
 
     popup_data = popup_curve_data(splines, kept_series)
     gdf = gdf.merge(popup_data, left_on="pin", right_index=True)
-    return gdf, best_k
+    return gdf
 
 
 def plot_static_map(gdf, out_path):
@@ -101,7 +99,7 @@ def plot_static_map(gdf, out_path):
         group = gdf[gdf["cluster_label"] == label]
         if len(group):
             group.plot(ax=ax, color=color, linewidth=0, label=f"{label} (n={len(group)})")
-    ax.set_title(f"McLean County crop-type clusters (from NDVI curve shape), n={len(gdf)} parcels")
+    ax.set_title(f"McLean County crop-type clusters (from EVI2 curve shape), n={len(gdf)} parcels")
     ax.set_axis_off()
     ax.legend(loc="lower right", fontsize=8)
     fig.tight_layout()
@@ -197,7 +195,7 @@ def plot_interactive_map(gdf, out_path):
 
 
 if __name__ == "__main__":
-    gdf, best_k = build_dataset()
+    gdf = build_dataset()
     print(gdf["cluster_label"].value_counts(), flush=True)
     plot_static_map(gdf, REPORTS_DIR / "county_crop_map.png")
     plot_interactive_map(gdf, REPORTS_DIR / "county_crop_map.html")

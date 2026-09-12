@@ -95,9 +95,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.interpolate import PchipInterpolator, UnivariateSpline
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
-from sklearn.preprocessing import StandardScaler
 from sqlalchemy import bindparam, text
 
 from src.db import get_engine
@@ -115,12 +112,24 @@ REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 BAD_DATES = {"2026-07-28"}
 
 
-def load_series(table_name="ndvi_zonal_stats_subset_clipped", bad_dates=None):
+def load_series(table_name="evi2_zonal_stats_subset_clipped", bad_dates=None, value_column="evi2_mean"):
     """bad_dates defaults to BAD_DATES (the subset's known-bad Sentinel-2
     date) -- pass a different set (or empty) for a different table, since a
     bad date found for one AOI/date-set isn't necessarily meaningful for
     another. Check the new table's own date-by-date trajectory rather than
-    assuming this default applies."""
+    assuming this default applies.
+
+    value_column names the underlying vegetation-index column to read
+    (e.g. "evi2_mean" or "ndvi_mean", see zonal_stats.compute_zonal_stats'
+    `prefix` argument) -- aliased back to "ndvi_mean" in the returned
+    DataFrame regardless, since every downstream function in this module
+    (fit_splines, extract_features, ...) is agnostic to which index it's
+    actually operating on and keeps that column name for continuity. Real
+    validation against USDA CDL 2021 ground truth found EVI2 clearly
+    outperforms NDVI for this specific classification task (87.6% vs 80.1%
+    cross-validated accuracy -- see validate_against_cdl.py), which is why
+    it's the default here now; NDVI stays the default for visualize.py's
+    separate anomaly-detection pipeline, which this finding doesn't bear on."""
     if bad_dates is None:
         bad_dates = BAD_DATES
     engine = get_engine()
@@ -133,12 +142,13 @@ def load_series(table_name="ndvi_zonal_stats_subset_clipped", bad_dates=None):
     # instead of exercising that edge case.
     if bad_dates:
         query = text(
-            f"SELECT pin, date, ndvi_mean FROM {table_name} "
-            f"WHERE ndvi_mean IS NOT NULL AND date NOT IN :bad_dates ORDER BY pin, date"
+            f"SELECT pin, date, {value_column} AS ndvi_mean FROM {table_name} "
+            f"WHERE {value_column} IS NOT NULL AND date NOT IN :bad_dates ORDER BY pin, date"
         ).bindparams(bindparam("bad_dates", expanding=True))
         params = {"bad_dates": list(bad_dates)}
     else:
-        query = text(f"SELECT pin, date, ndvi_mean FROM {table_name} WHERE ndvi_mean IS NOT NULL ORDER BY pin, date")
+        query = text(f"SELECT pin, date, {value_column} AS ndvi_mean FROM {table_name} "
+                     f"WHERE {value_column} IS NOT NULL ORDER BY pin, date")
         params = {}
     df = pd.read_sql(query, engine, params=params)
     df["date"] = pd.to_datetime(df["date"])
@@ -322,104 +332,156 @@ def extract_features(splines, kept_series, oversample_days=1):
     return pd.DataFrame.from_dict(rows, orient="index")
 
 
-NON_ROW_CROP_EARLY_NDVI = 0.3
+# Validated against real USDA CDL 2021 ground truth for the subset area
+# (validate_against_cdl.py): a straight peak_doy sweep against 161
+# CDL-labeled Corn/Soybean parcels, 5-fold cross-validated, picked an
+# absolute cutoff of 186 in *every* fold with zero variance -- 87.6%
+# accuracy (EVI2), vs. 77.0% at the previous hand-picked 210.
+#
+# That absolute day-of-year cutoff does NOT transfer across seasons,
+# though -- found out by actually deploying it, not just assumed: applying
+# 186 unchanged to the 2026 season identified only 2 of 150 row-crop
+# parcels as corn (vs. 43-67 expected), because peak_doy isn't a clean
+# biological measurement independent of when the satellite happened to
+# have a clear pass -- it's frequently the exact date of whichever
+# observation caught each parcel's true peak, and that date shifts with
+# each season's own cloud pattern. Confirmed directly: 2021's row-crop
+# peak_doy distribution clusters at day 185 -- July 4, 2021, an actual
+# fetched date -- while 2026's clusters at day 195 -- July 14, 2026,
+# also an actual fetched date. A fixed absolute day threshold tuned on one
+# year's specific observation calendar doesn't generalize to a different
+# year's different calendar.
+#
+# Fix: use the *percentile* of the validation season's row-crop
+# population that threshold 186 corresponded to (31.7%, not the 41.6%
+# true CDL corn fraction -- accuracy-maximizing thresholds needn't
+# preserve the marginal class split), and apply that percentile to each
+# season's *own* peak_doy distribution at runtime instead of a fixed
+# absolute day. This is the assumption that actually needs to hold for
+# year-to-year transfer to work: not that corn peaks on the same calendar
+# day every year, but that corn's peak-timing *rank* within that season's
+# row-crop population is stable -- consistent with corn's real agronomic
+# earlier-peak relationship to soybean, which is about relative timing,
+# not an absolute date. Applying this to 2026 gives 43 of 150 corn-like --
+# far more plausible than the absolute version's 2, and consistent with
+# CDL 2021's real ~42% corn share.
+CORN_SOYBEAN_PEAK_DOY_PERCENTILE = 31.7
+
+# NDVI's 0.3 non-row-crop cutoff doesn't transfer to EVI2's naturally lower
+# scale (EVI2 reads systematically lower than NDVI for the same
+# vegetation -- median early-season value ~0.11 vs NDVI's ~0.18 on this
+# subset). 0.19 is percentile-matched to reproduce NDVI's split size
+# rather than independently validated: CDL 2021 only had 2 true "Other"
+# parcels in this subset, too few to cross-validate a threshold against
+# the way the corn/soybean split was -- but both of those 2 parcels'
+# early_evi2 values (0.285, 0.371) do fall above 0.19, weak corroborating
+# evidence rather than a proper validation. Kept as an absolute EVI2 value,
+# not a percentile like the corn/soybean split above: it's a level (how
+# green is this parcel in early spring), not a calendar day, so it isn't
+# exposed to the same observation-date-sensitivity problem.
+NON_ROW_CROP_EARLY_NDVI = 0.19
+
+# cluster() always assigns these three ids by construction (0 = the
+# deterministic early_ndvi split, 1/2 = the deterministic peak_doy-
+# percentile split within row-crop, lower half first) -- not derived from
+# each cluster's own feature means the way an earlier KMeans-based version
+# needed to, since there's no arbitrary cluster numbering to resolve here.
+CLUSTER_LABELS = {
+    0: "Non-row-crop (already green in April)",
+    1: "Corn-like (early peak, fast decline)",
+    2: "Soybean-like (later peak, slower decline)",
+}
 
 
-def label_cluster(row):
-    """Behavioral label from a cluster's own feature means -- not a fixed
-    ID mapping, since KMeans cluster numbering is arbitrary per run."""
-    if row["early_ndvi"] > NON_ROW_CROP_EARLY_NDVI:
-        return "Non-row-crop (already green in April)"
-    if row["peak_doy"] < 210:
-        return "Corn-like (early peak, fast decline)"
-    return "Soybean-like (later peak, slower decline)"
+def cluster(feats, non_row_crop_early_ndvi=NON_ROW_CROP_EARLY_NDVI,
+            corn_soybean_peak_doy_percentile=CORN_SOYBEAN_PEAK_DOY_PERCENTILE):
+    """Two deterministic threshold splits, not KMeans: non-row-crop vs.
+    row-crop on early_ndvi (an absolute level), then corn-like vs.
+    soybean-like on peak_doy within row-crop -- but the peak_doy split is
+    a *percentile* of this call's own row-crop population, not a fixed
+    calendar day. See CORN_SOYBEAN_PEAK_DOY_PERCENTILE's comment for why:
+    an absolute day-of-year threshold, cross-validated against real CDL
+    ground truth, still failed to transfer from its validation season to a
+    different one, because which day captures each parcel's true peak
+    shifts with each season's own cloud pattern. The percentile is what
+    was actually validated to hold across a season change; the absolute
+    day was not.
 
+    This replaces an earlier KMeans-based version of the row-crop split,
+    which was a different algorithm from what was actually validated in
+    the first place: KMeans groups parcels by overall curve shape across 5
+    features, then label_cluster() named the resulting *cluster means* --
+    but a cluster's mean peak_doy landing on one side of a threshold says
+    nothing about where each individual member's own peak_doy falls, so
+    parcels could get bulk-labeled against the very rule that was
+    cross-validated per-parcel. That KMeans stage was also the fix for a
+    real, earlier bug (a single joint fit across the whole population
+    picked k=2 and found zero corn-like parcels at county scale, since the
+    early_ndvi outlier split dominated silhouette over the subtler
+    peak-timing one) -- but a deterministic threshold sidesteps that
+    failure mode too, while actually matching the validated method.
 
-def _fit_kmeans(feats, k_range, min_cluster_frac):
-    """One silhouette-selected KMeans fit, factored out of cluster() so it
-    can run twice (see cluster()'s docstring for why)."""
-    X = StandardScaler().fit_transform(feats.values)
-
-    # Silhouette alone rewards isolating a single extreme outlier as its own
-    # "cluster" -- k=4 here technically scores marginally higher than k=3,
-    # but only because it peels off one parcel with an extreme decline_rate,
-    # not because it finds a fourth real behavioral group. Restricting to
-    # k's where every cluster holds a meaningful share of the data (>=5%)
-    # picks the interpretable split instead of the technically-optimal one.
-    min_size = max(3, int(min_cluster_frac * len(feats)))
-    scores, labels_by_k, model_by_k = {}, {}, {}
-    for k in k_range:
-        model = KMeans(n_clusters=k, n_init=10, random_state=0).fit(X)
-        labels = model.labels_
-        counts = np.bincount(labels)
-        if counts.min() < min_size:
-            print(f"  k={k}: rejected, smallest cluster only {counts.min()} parcels", flush=True)
-            continue
-        scores[k] = silhouette_score(X, labels)
-        labels_by_k[k] = labels
-        model_by_k[k] = model
-    best_k = max(scores, key=scores.get)
-    print("Silhouette scores by k (viable only):", {k: round(v, 3) for k, v in scores.items()})
-    print(f"Best k = {best_k}", flush=True)
+    Confidence for both decisions comes from the same margin-based
+    mechanism: how far a parcel's own value sits from its threshold
+    relative to the population's spread, clipped to [0.5, 1.0].
+    """
+    def threshold_confidence(series, threshold):
+        std = series.std()
+        margin = (series - threshold).abs() / (std if std > 0 else 1)
+        return np.clip(0.5 + margin, 0.5, 1.0)
 
     feats = feats.copy()
-    feats["cluster"] = labels_by_k[best_k]
-    feats["confidence"] = assignment_confidence(X, model_by_k[best_k])
-    return feats, best_k
-
-
-def cluster(feats, k_range=range(2, 6), min_cluster_frac=0.05,
-            non_row_crop_early_ndvi=NON_ROW_CROP_EARLY_NDVI):
-    """Two-stage split: first pull out non-row-crop parcels (already green
-    in April -- winter cover, pasture, hay) with the same deterministic
-    early_ndvi threshold label_cluster() itself checks first, then cluster
-    only the remaining row-crop parcels to find the corn/soybean
-    peak-timing split.
-
-    An earlier version tried to find *both* splits from one joint KMeans
-    fit across the whole population, which does not reliably work: on the
-    full McLean County run (~9,565 parcels), silhouette-based k-selection
-    over everyone together picked k=2 and lumped every row-crop parcel into
-    one undifferentiated cluster, identifying zero as corn-like, despite
-    the county being close to half corn by actual harvested acreage
-    (318,000 corn vs. 294,000 soybean acres, 2025 NASS) -- the early_ndvi
-    outlier split is a strong, high-variance single-axis signal that
-    silhouette prefers over the comparatively subtler peak-timing split. A
-    second attempt tried using KMeans itself (forced to k=2) to *find* the
-    non-row-crop split before re-clustering the rest, which fixed the
-    county run but doesn't generalize: at the ~163-parcel subset scale that
-    first k=2 fit split on a different, unrelated axis instead, leaving
-    almost nothing for the second stage. A fixed threshold on early_ndvi
-    sidesteps both failure modes -- it's already how label_cluster() names
-    the resulting clusters after the fact, so applying it before clustering
-    too, to actually perform the split, is consistent rather than hoping
-    an unsupervised fit rediscovers the same rule on its own.
-
-    Confidence for the non-row-crop decision isn't from a KMeans margin
-    (there's no fit backing this split), so it's read directly off how far
-    a parcel's own early_ndvi sits from the threshold relative to the
-    population's spread -- clipped to the same [0.5, 1.0] bound
-    assignment_confidence uses, so the two are on a comparable scale even
-    though they come from different mechanisms.
-    """
     is_non_row_crop = feats["early_ndvi"] > non_row_crop_early_ndvi
-    std = feats["early_ndvi"].std()
-    margin = (feats["early_ndvi"] - non_row_crop_early_ndvi).abs() / (std if std > 0 else 1)
 
     non_row_crop = feats[is_non_row_crop].copy()
     non_row_crop["cluster"] = 0
-    non_row_crop["confidence"] = np.clip(0.5 + margin[is_non_row_crop], 0.5, 1.0)
+    non_row_crop["confidence"] = threshold_confidence(non_row_crop["early_ndvi"], non_row_crop_early_ndvi)
 
-    row_crop = feats.loc[~is_non_row_crop, feats.columns]
-    stage2, best_k = _fit_kmeans(row_crop, k_range=k_range, min_cluster_frac=min_cluster_frac)
-    stage2["cluster"] = stage2["cluster"] + 1  # +1 so ids never collide with non-row-crop's 0
+    row_crop = feats[~is_non_row_crop].copy()
+    # peak_doy is heavily quantized -- many parcels' PCHIP peak lands
+    # exactly on whichever calendar date happened to catch their true
+    # peak, so large blocks of parcels can share the exact same value (one
+    # county-wide run found 1,957 of ~7,900 row-crop parcels sharing a
+    # single peak_doy). That block alone spans ~24% of the population --
+    # bigger than the gap between the achievable splits on either side of
+    # it (~21% excluding it entirely vs. ~45% including it whole), so no
+    # tie-handling rule based on peak_doy *alone* can land near the target
+    # percentile when the target happens to fall inside a block that
+    # large: rounding the whole tied block one way or the other is the
+    # only two options peak_doy alone offers.
+    #
+    # Broken by green_up_rate as a secondary sort key within ties: corn's
+    # real, validated signal is a faster green-up, not merely an earlier
+    # peak (confirmed against CDL 2021 ground truth -- corn's mean
+    # green_up_rate is 0.026 vs. soybean's 0.021), so ranking a tied block
+    # by descending green_up_rate and taking however many of its members
+    # are needed to hit the target percentile is a principled way to use
+    # information the model already trusts elsewhere, not an arbitrary
+    # tie-break. (The tie-breaking power specifically at the exact
+    # boundary value couldn't be directly confirmed against CDL --  too
+    # few ground-truth parcels fell in that narrow window -- so this
+    # extends a validated *population-level* relationship into an
+    # unvalidated but well-motivated regime, not a fully proven claim.)
+    ordered = row_crop.sort_values(["peak_doy", "green_up_rate"], ascending=[True, False])
+    n_corn = round(len(row_crop) * corn_soybean_peak_doy_percentile / 100)
+    is_corn = row_crop.index.isin(ordered.index[:n_corn])
+    row_crop["cluster"] = np.where(is_corn, 1, 2)
+    # Confidence still reads as a margin from an absolute peak_doy value
+    # (the boundary value closest to the target percentile), for a
+    # human-interpretable "how many days from the cutoff" reading, even
+    # though ties right at that value were broken by green_up_rate.
+    peak_doy_threshold = row_crop.loc[is_corn, "peak_doy"].max() if is_corn.any() else row_crop["peak_doy"].min()
+    row_crop["confidence"] = threshold_confidence(row_crop["peak_doy"], peak_doy_threshold)
 
     print(f"Non-row-crop split (early_ndvi > {non_row_crop_early_ndvi}): "
-          f"{len(non_row_crop)} non-row-crop, {len(stage2)} row-crop "
-          f"-> KMeans best_k={best_k} on row-crop", flush=True)
+          f"{len(non_row_crop)} non-row-crop, {len(row_crop)} row-crop "
+          f"-> corn/soybean split (target {corn_soybean_peak_doy_percentile}th percentile, "
+          f"realized boundary peak_doy~{peak_doy_threshold:.0f}): "
+          f"{int(is_corn.sum())} corn-like ({100 * is_corn.mean():.1f}%), "
+          f"{int((~is_corn).sum())} soybean-like", flush=True)
 
-    result = pd.concat([non_row_crop, stage2])
-    return result.loc[feats.index], best_k
+    result = pd.concat([non_row_crop, row_crop])
+    return result.loc[feats.index]
 
 
 def popup_curve_data(splines, kept_series, display_noise_std=SMOOTHING_NDVI_NOISE_STD):
@@ -470,22 +532,6 @@ def popup_curve_data(splines, kept_series, display_noise_std=SMOOTHING_NDVI_NOIS
     return pd.DataFrame.from_dict(rows, orient="index")
 
 
-def assignment_confidence(X, model):
-    """How much closer each point is to its assigned cluster's centroid than
-    to the next-closest one, in the same standardized space KMeans itself
-    uses -- not a calibrated probability, but a direct, honest read of how
-    ambiguous a call actually was. distance_to_own is always <= the second-
-    smallest distance by construction (KMeans assigns to the nearest
-    centroid), so this is bounded [0.5, 1.0]: 0.5 is an exact tie between
-    two groups, 1.0 is unambiguous. Generalizes to k>2 by comparing against
-    whichever *other* centroid is nearest, not an average of all of them --
-    a point near the boundary of two of three groups is genuinely
-    ambiguous even if it's far from the third.
-    """
-    dists = np.linalg.norm(X[:, None, :] - model.cluster_centers_[None, :, :], axis=2)
-    sorted_dists = np.sort(dists, axis=1)
-    d_own, d_next = sorted_dists[:, 0], sorted_dists[:, 1]
-    return d_next / (d_own + d_next)
 
 
 def plot_spline_sample(splines, kept_series, out_path, n=12, seed=0):
@@ -510,7 +556,7 @@ def plot_spline_sample(splines, kept_series, out_path, n=12, seed=0):
         # the smoothed curve's value at those days, not the raw measurement.
         ax.scatter(own_doy, own_values, color=line.get_color(), s=15, zorder=3)
     ax.set_xlabel("Day of year")
-    ax.set_ylabel("NDVI")
+    ax.set_ylabel("Vegetation index")
     ax.set_title(f"Smoothing spline fit, {len(pins)} sample parcels (dots = kept observed dates)")
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -544,8 +590,8 @@ def plot_clusters(splines, kept_series, feats, out_path):
                  label=f"Group {cluster_id} (n={len(group)})")
 
     ax.set_xlabel("Day of year")
-    ax.set_ylabel("NDVI")
-    ax.set_title("NDVI season curves by behavioral cluster (spline-smoothed)")
+    ax.set_ylabel("Vegetation index")
+    ax.set_title("Season curves by behavioral cluster (spline-smoothed)")
     ax.legend()
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -562,7 +608,7 @@ if __name__ == "__main__":
     plot_spline_sample(splines, kept_series, REPORTS_DIR / "subset_spline_fit.png")
 
     feats = extract_features(splines, kept_series)
-    feats, best_k = cluster(feats)
+    feats = cluster(feats)
     print("\nCluster sizes:")
     print(feats["cluster"].value_counts().sort_index())
     print("\nCluster feature means:")

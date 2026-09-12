@@ -75,7 +75,7 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
-from src.crop_clusters import cluster, extract_features, fit_splines, label_cluster, load_series
+from src.crop_clusters import CLUSTER_LABELS, cluster, extract_features, fit_splines, load_series
 from src.db import get_engine
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
@@ -163,7 +163,7 @@ if __name__ == "__main__":
     import sys
 
     county = len(sys.argv) > 1 and sys.argv[1] == "county"
-    zonal_table = "ndvi_zonal_stats_county_clipped" if county else "ndvi_zonal_stats_subset_clipped"
+    zonal_table = "evi2_zonal_stats_county_clipped" if county else "evi2_zonal_stats_subset_clipped"
     parcels_table = "parcels_clipped_county" if county else "parcels_clipped"
     out_csv = REPORTS_DIR / ("yield_ranking_county.csv" if county else "yield_ranking.csv")
 
@@ -171,7 +171,7 @@ if __name__ == "__main__":
     # date (2026-07-28) -- meaningless, and wrong, for the county table:
     # that same date came back 48% clear over the whole county and was kept
     # as a good candidate by fetch_timeseries.py's county-mode run.
-    df = load_series(table_name=zonal_table, bad_dates=frozenset() if county else None)
+    df = load_series(table_name=zonal_table, bad_dates=frozenset() if county else None, value_column="evi2_mean")
     if county:
         # Bloomington/Normal parcels excluded before clustering/yield
         # estimation, not just hidden on a map -- see exclude_urban.py.
@@ -184,15 +184,13 @@ if __name__ == "__main__":
               f"(inside Bloomington/Normal city limits)", flush=True)
     splines, kept_series = fit_splines(df)
     feats = extract_features(splines, kept_series)
-    feats, best_k = cluster(feats)
+    feats = cluster(feats)
 
     integrals = seasonal_ndvi_integral(splines, kept_series)
     feats["seasonal_ndvi_integral"] = feats.index.map(integrals)
     feats = rank_within_cluster(feats)
 
-    cluster_means = feats.groupby("cluster").mean(numeric_only=True)
-    label_by_id = {cid: label_cluster(row) for cid, row in cluster_means.iterrows()}
-    feats["cluster_label"] = feats["cluster"].map(label_by_id)
+    feats["cluster_label"] = feats["cluster"].map(CLUSTER_LABELS)
     feats = estimate_yield_bu_ac(feats)
 
     acreage = fetch_acreage(feats.index, parcels_table=parcels_table)

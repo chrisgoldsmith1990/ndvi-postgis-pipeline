@@ -20,7 +20,7 @@ import folium
 import geopandas as gpd
 from sqlalchemy import text
 
-from src.crop_clusters import cluster, extract_features, fit_splines, label_cluster, load_series, popup_curve_data
+from src.crop_clusters import CLUSTER_LABELS, cluster, extract_features, fit_splines, load_series, popup_curve_data
 from src.db import get_engine
 from src.yield_ranking import (
     estimate_total_bushels,
@@ -37,11 +37,9 @@ def build_dataset():
     df = load_series()
     splines, kept_series = fit_splines(df)
     feats = extract_features(splines, kept_series)
-    feats, best_k = cluster(feats)
+    feats = cluster(feats)
 
-    cluster_means = feats.groupby("cluster").mean()
-    label_by_id = {cid: label_cluster(row) for cid, row in cluster_means.iterrows()}
-    feats["cluster_label"] = feats["cluster"].map(label_by_id)
+    feats["cluster_label"] = feats["cluster"].map(CLUSTER_LABELS)
 
     integrals = seasonal_ndvi_integral(splines, kept_series)
     feats["seasonal_ndvi_integral"] = feats.index.map(integrals)
